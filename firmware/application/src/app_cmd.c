@@ -2584,6 +2584,15 @@ static data_frame_tx_t *cmd_processor_hf14a_sniff(uint16_t cmd, uint16_t status,
  * HF14A-4 ISO14443-4 T=CL emulation commands (6000-range)
  * ======================================================================== */
 
+static data_frame_tx_t *before_hf14a_4_emulator(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    tag_slot_specific_type_t types;
+    tag_emulation_get_specific_types_by_slot(tag_emulation_get_slot(), &types);
+    if (types.tag_hf != TAG_TYPE_HF14A_4)
+        return data_frame_make(cmd, STATUS_INVALID_SLOT_TYPE, 0, NULL);
+    return NULL;
+}
+
 /**
  * HF14A-4 APDU recv — non-blocking poll.
  * Returns STATUS_SUCCESS + APDU bytes if one is pending, STATUS_HF_TAG_NO otherwise.
@@ -3096,13 +3105,13 @@ static cmd_data_map_t m_data_cmd_map[] = {
     /* ISO14443-4 T=CL emulation */
 #if defined(PROJECT_CHAMELEON_ULTRA)
     /* ISO14443-4 T=CL emulation */
-    {    DATA_CMD_HF14A_4_APDU_RECV,              NULL,                        cmd_processor_hf14a_4_apdu_recv,             NULL                   },
-    {    DATA_CMD_HF14A_4_APDU_SEND,              NULL,                        cmd_processor_hf14a_4_apdu_send,             NULL                   },
-    {    DATA_CMD_HF14A_4_SET_ANTI_COLL,          NULL,                        cmd_processor_hf14a_4_set_anti_coll,         NULL                   },
-    {    DATA_CMD_HF14A_4_STATIC_RESP,            NULL,                        cmd_processor_hf14a_4_static_resp,           NULL                   },
+    {    DATA_CMD_HF14A_4_APDU_RECV,              before_hf14a_4_emulator,                        cmd_processor_hf14a_4_apdu_recv,             NULL                   },
+    {    DATA_CMD_HF14A_4_APDU_SEND,              before_hf14a_4_emulator,                        cmd_processor_hf14a_4_apdu_send,             NULL                   },
+    {    DATA_CMD_HF14A_4_SET_ANTI_COLL,          before_hf14a_4_emulator,                        cmd_processor_hf14a_4_set_anti_coll,         NULL                   },
+    {    DATA_CMD_HF14A_4_STATIC_RESP,            before_hf14a_4_emulator,                        cmd_processor_hf14a_4_static_resp,           NULL                   },
     {    DATA_CMD_HF14A_4_READER_APDU,            before_reader_run,        cmd_processor_hf14a_4_reader_apdu,           NULL                   },
     {    DATA_CMD_HF14A_4_SESSION,                before_reader_run,           cmd_processor_hf14a_4_session,               NULL                   },
-    {    DATA_CMD_HF14A_4_STATIC_READ,            NULL,                        cmd_processor_hf14a_4_static_read,           NULL                   },
+    {    DATA_CMD_HF14A_4_STATIC_READ,            before_hf14a_4_emulator,                        cmd_processor_hf14a_4_static_read,           NULL                   },
     {    DATA_CMD_HF14A_4_EMV_SCAN,               before_hf_reader_run,        cmd_processor_hf14a_4_emv_scan,              NULL                   },
     {    6010,                                     NULL,                        cmd_processor_hf14a_4_debug_counters,        NULL                   },
     /* HF14A scan keeping field alive */
