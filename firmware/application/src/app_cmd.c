@@ -2586,6 +2586,8 @@ static data_frame_tx_t *cmd_processor_hf14a_sniff(uint16_t cmd, uint16_t status,
 
 static data_frame_tx_t *before_hf14a_4_emulator(uint16_t cmd, uint16_t status,
         uint16_t length, uint8_t *data) {
+    /* A read-only capability query must precede changing any existing slot. */
+    if (cmd == DATA_CMD_HF14A_4_FILESYSTEM && length == 1 && data[0] == 7) return NULL;
     tag_slot_specific_type_t types;
     tag_emulation_get_specific_types_by_slot(tag_emulation_get_slot(), &types);
     if (types.tag_hf != TAG_TYPE_HF14A_4)
@@ -2777,6 +2779,10 @@ static data_frame_tx_t *cmd_processor_hf14a_4_session(uint16_t cmd, uint16_t sta
 /* 6009: atomic CFS1 file-image management; chunks are at most 200 bytes. */
 static data_frame_tx_t *cmd_processor_hf14a_4_filesystem(uint16_t cmd, uint16_t status,
         uint16_t length, uint8_t *data) {
+    if (length == 1 && data[0] == 7) {
+        const uint8_t capabilities[] = {2, 3};
+        return data_frame_make(cmd, STATUS_SUCCESS, sizeof(capabilities), capabilities);
+    }
     uint8_t out[200]; uint16_t size = 0;
     bool valid = nfc_tag_14a_4_filesystem_command(data, length, out, &size);
     return data_frame_make(cmd, valid ? STATUS_SUCCESS : STATUS_PAR_ERR, valid ? size : 0, out);
