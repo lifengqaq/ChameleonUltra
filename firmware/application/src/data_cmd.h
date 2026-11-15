@@ -194,6 +194,8 @@
 #define DATA_CMD_HF14A_4_SET_ANTI_COLL          (6002)  /* set UID/ATQA/SAK/ATS */
 #define DATA_CMD_HF14A_4_STATIC_RESP            (6003)  /* add/clear static APDU response pair */
 #define DATA_CMD_HF14A_4_READER_APDU            (6004)  /* select+RATS+send APDU, keep field   */
+#define DATA_CMD_HF14A_4_SESSION                (6007)  /* explicit ISO-DEP session open/close */
+#define DATA_CMD_HF14A_4_STATIC_READ            (6008)  /* enumerate stored response table */
 #define DATA_CMD_HF14A_4_EMV_SCAN               (6005)  /* full EMV scan in one call            */
 
 #define DATA_CMD_EM410X_SET_EMU_ID              (5000)

@@ -1,0 +1,24 @@
+name: ISO-DEP regression
+on:
+  push:
+    branches: ['feature/iso14443-4-cpu']
+  pull_request:
+    paths:
+      - 'firmware/application/src/rfid/nfctag/hf/iso14443_4.*'
+      - 'tests/iso14443_4_test.c'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  transport-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile protocol tests with address and undefined behavior sanitizers
+        run: >-
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g
+          -Ifirmware/application/src/rfid/nfctag/hf
+          firmware/application/src/rfid/nfctag/hf/iso14443_4.c
+          tests/iso14443_4_test.c -o /tmp/iso14443_4_test
+      - name: Run protocol regression fixtures
+        run: /tmp/iso14443_4_test

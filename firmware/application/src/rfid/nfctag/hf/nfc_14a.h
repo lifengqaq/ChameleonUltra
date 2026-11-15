@@ -112,6 +112,7 @@ typedef struct {
     nfc_tag_14a_reset_handler_t cb_reset;
     nfc_tag_14a_state_handler_t cb_state;
     nfc_tag_14a_coll_handler_t get_coll_res;
+    void (*cb_rats)(uint8_t parameter);
 } nfc_tag_14a_handler_t;
 
 // Different or verification code

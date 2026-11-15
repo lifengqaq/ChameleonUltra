@@ -48,19 +48,9 @@ typedef struct __attribute__((packed)) {
 }
 nfc_tag_14a_4_information_t;
 
-/* T=CL session state */
-typedef struct __attribute__((packed)) {
-    uint8_t  m_block_num;
-    bool     m_cid_supported;
-    uint8_t  m_cid;
-    uint8_t  m_apdu_buf[NFC_14A_4_MAX_APDU];
-    uint16_t m_apdu_len;
-    bool     m_apdu_pending;
-    uint8_t  m_resp_buf[NFC_14A_4_MAX_APDU];
-    uint16_t m_resp_len;
-    bool     m_response_ready;
-}
-nfc_tag_14a_4_tcl_state_t;
+/* Shared protocol engine; this state is RAM-only, not a flash layout. */
+#include "iso14443_4.h"
+typedef iso_dep_picc_t nfc_tag_14a_4_tcl_state_t;
 
 /* Anti-collision resource — used by get_coll_res_data in app_cmd.c */
 nfc_tag_14a_coll_res_reference_t *nfc_tag_14a_4_get_coll_res(void);
@@ -75,18 +65,22 @@ int  nfc_tag_14a_4_data_savecb(tag_specific_type_t type, tag_data_buffer_t *buff
 bool nfc_tag_14a_4_data_factory(uint8_t slot, tag_specific_type_t tag_type);
 
 /* Static response table management (called before hw mode -e) */
-void nfc_tag_14a_4_add_static_response(const uint8_t *cmd,  uint8_t cmd_len,
+bool nfc_tag_14a_4_add_static_response(const uint8_t *cmd,  uint8_t cmd_len,
                                        const uint8_t *resp, uint16_t resp_len);
 void nfc_tag_14a_4_clear_static_responses(void);
+uint8_t nfc_tag_14a_4_static_response_count(void);
+bool nfc_tag_14a_4_get_static_response(uint8_t index, const uint8_t **cmd,
+    uint8_t *cmd_len, const uint8_t **response, uint16_t *response_len);
 
 /* APDU relay — host-driven responses */
 bool nfc_tag_14a_4_get_pending_apdu(uint8_t *buf, uint16_t *length);
-void nfc_tag_14a_4_set_response(const uint8_t *data, uint16_t length);
+bool nfc_tag_14a_4_set_response(const uint8_t *data, uint16_t length);
 
 /* Reset handler */
 void nfc_tag_14a_4_reset_state(nfc_tag_14a_4_tcl_state_t *m_tcl_session_state);
 void nfc_tag_14a_4_reset_handler(void);
 
-#endif /* NFC_14A_4_H */
 
 void nfc_tag_14a_4_get_debug_counters(uint8_t *rx, uint8_t *tx, uint8_t *last_pcb, uint8_t *last_match);
+
+#endif /* NFC_14A_4_H */

@@ -572,6 +572,8 @@ void nfc_tag_14a_data_process(uint8_t *p_data) {
                     if (m_tag_handler.cb_reset != NULL) {
                         m_tag_handler.cb_reset();
                     }
+                    if ((p_data[1] >> 4) > 8 || (p_data[1] & 15) == 15) return;
+                    if (m_tag_handler.cb_rats) m_tag_handler.cb_rats(p_data[1]);
                     // Make sure the sub -packaging opens the support of ATS
                     if (auto_coll_res->ats->length > 0) {
                         // Take out FSD and return according to the maximum FSD
@@ -779,6 +781,7 @@ void nfc_tag_14a_set_handler(nfc_tag_14a_handler_t *handler) {
         m_tag_handler.cb_reset = handler->cb_reset;
         m_tag_handler.cb_state = handler->cb_state;
         m_tag_handler.get_coll_res = handler->get_coll_res;
+        m_tag_handler.cb_rats = handler->cb_rats;
     }
 }
 

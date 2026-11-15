@@ -32,6 +32,10 @@ extern void nfc_tag_14a_clear_tx_sniff_cb(void);
 extern void nfc_tag_14a_set_sniff_passive(bool passive);
 #include "nfc_14a_4.h"
 
+#if defined(PROJECT_CHAMELEON_ULTRA)
+static bool m_cpu_active = false;
+#endif
+
 #define NRF_LOG_MODULE_NAME app_cmd
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
@@ -75,6 +79,7 @@ static data_frame_tx_t *cmd_processor_change_device_mode(uint16_t cmd, uint16_t 
 
     if (data[0] == 1) {
 #if defined(PROJECT_CHAMELEON_ULTRA)
+        m_cpu_active = false;
         reader_mode_enter();
         return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 #else
@@ -82,6 +87,7 @@ static data_frame_tx_t *cmd_processor_change_device_mode(uint16_t cmd, uint16_t 
 #endif
     } else {
 #if defined(PROJECT_CHAMELEON_ULTRA)
+        m_cpu_active = false;
         tag_mode_enter();
 #endif
         return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
@@ -679,6 +685,8 @@ static data_frame_tx_t *cmd_processor_mf0_ulc_set_key(uint16_t cmd, uint16_t sta
 #if defined(PROJECT_CHAMELEON_ULTRA)
 
 static data_frame_tx_t *cmd_processor_hf14a_set_field_on(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (cmd != DATA_CMD_HF14A_4_READER_APDU && cmd != DATA_CMD_HF14A_4_SESSION)
+        m_cpu_active = false;
     device_mode_t mode = get_device_mode();
     if (mode != DEVICE_MODE_READER) {
         return data_frame_make(cmd, STATUS_DEVICE_MODE_ERROR, 0, NULL);
@@ -2595,12 +2603,13 @@ static data_frame_tx_t *cmd_processor_hf14a_4_apdu_recv(uint16_t cmd, uint16_t s
  * payload: len_be16(2) + resp_bytes
  */
 static data_frame_tx_t *cmd_processor_hf14a_4_apdu_send(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    extern void nfc_tag_14a_4_set_response(const uint8_t *data, uint16_t length);
+
     if (length < 2) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     uint16_t resp_len = ((uint16_t)data[0] << 8) | data[1];
-    if (resp_len > NFC_14A_4_MAX_APDU || length < 2 + resp_len)
+    if (resp_len < 2 || resp_len > NFC_14A_4_MAX_APDU || length != 2 + resp_len)
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
-    nfc_tag_14a_4_set_response(&data[2], resp_len);
+    if (!nfc_tag_14a_4_set_response(&data[2], resp_len))
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -2614,6 +2623,11 @@ static data_frame_tx_t *cmd_processor_hf14a_4_set_anti_coll(uint16_t cmd, uint16
             length < 1 + data[0] + 2 + 1 + 1 + data[1 + data[0] + 2 + 1]) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
+    uint8_t ats_len = data[data[0] + 4];
+    iso_dep_reader_t validation;
+    if (length != 5 + data[0] + ats_len || !(data[data[0] + 3] & 0x20) ||
+            !iso_dep_reader_init(&validation, data + data[0] + 5, ats_len))
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     nfc_tag_14a_coll_res_reference_t *info = get_coll_res_data(true);
     if (info == NULL) return data_frame_make(cmd, STATUS_HF_TAG_NO, 0, NULL);
     uint16_t offset = 0;
@@ -2639,15 +2653,16 @@ static data_frame_tx_t *cmd_processor_hf14a_4_set_anti_coll(uint16_t cmd, uint16
 static data_frame_tx_t *cmd_processor_hf14a_4_static_resp(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
     if (length == 0) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     uint8_t cmd_len = data[0];
-    if (cmd_len == 0) {
+    if (cmd_len == 0 && length == 1) {
         nfc_tag_14a_4_clear_static_responses();
         return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
     }
-    if (length < (uint16_t)(1 + cmd_len + 2)) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    if (cmd_len == 0 || cmd_len > NFC_14A_4_MAX_STATIC_CMD_LEN || length < (uint16_t)(1 + cmd_len + 2)) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     /* resp_len is 2 bytes big-endian to support responses > 255 bytes */
     uint16_t resp_len = ((uint16_t)data[1 + cmd_len] << 8) | data[2 + cmd_len];
-    if (length < (uint16_t)(1 + cmd_len + 2 + resp_len)) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
-    nfc_tag_14a_4_add_static_response(&data[1], cmd_len, &data[3 + cmd_len], (uint8_t)resp_len);
+    if (resp_len < 2 || resp_len > NFC_14A_4_MAX_APDU || length != (uint16_t)(1 + cmd_len + 2 + resp_len)) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    if (!nfc_tag_14a_4_add_static_response(&data[1], cmd_len, &data[3 + cmd_len], resp_len))
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -2677,543 +2692,235 @@ static data_frame_tx_t *cmd_processor_hf14a_scan_keep(uint16_t cmd, uint16_t sta
 }
 
 
-/**
- * HF14A-4 reader APDU — activate field, select card (with RATS), send one
- * ISO14443-4 T=CL APDU, return the response, keep field alive.
- *
- * This performs the full select+RATS+APDU sequence in a single firmware call,
- * avoiding the USB round-trip gap that would cause the card to lose power.
- *
- * payload: apdu_bytes (raw APDU, no PCB wrapping needed — added here)
- * returns: raw APDU response bytes (PCB stripped)
- */
-static data_frame_tx_t *cmd_processor_hf14a_4_reader_apdu(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    if (length == 0 || length > 61) {
-        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
-    }
+/* Reader adapter: all APDUs in a session share RF power and ISO-DEP state. */
+static iso_dep_reader_t m_cpu_reader;
+static uint8_t m_cpu_io_status;
 
-    uint8_t resp_buf[64];    /* RC522 FIFO per chain block */
-    uint8_t resp_chain[512]; /* reassembled chained response */
-    uint16_t resp_chain_len = 0;
-    uint16_t resp_bits = 0;
-
-    /* Step 1: cycle field briefly to return card to IDLE state, then
-     * do full select + RATS via scan_auto. This is needed because the card
-     * may be in T=CL active state from a previous APDU exchange and won't
-     * respond to REQA/WUPA until powered off. */
+static void cpu_close(void) {
+    m_cpu_active = false;
     pcd_14a_reader_antenna_off();
+    pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
+}
+
+static uint8_t cpu_open(picc_14a_tag_t *tag) {
+    cpu_close();
     bsp_delay_ms(5);
     pcd_14a_reader_reset();
     pcd_14a_reader_antenna_on();
     bsp_delay_ms(8);
-
     pcd_14a_reader_timeout_set(200);
-    picc_14a_tag_t taginfo;
-    status = pcd_14a_reader_scan_auto(&taginfo);
-    if (status != STATUS_HF_TAG_OK) {
-        pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
-        uint8_t dbg[2] = {0x01, status};
-        return data_frame_make(cmd, STATUS_HF_TAG_NO, 2, dbg);
-    }
-    NRF_LOG_INFO("14A4_READER_APDU: scan_auto OK sak=%02x ats_len=%d",
-                 taginfo.sak, taginfo.ats_len);
-
-    /* Step 3: wrap APDU in I-block (PCB=0x02) and send */
-    uint8_t frame_buf[64];
-    frame_buf[0] = 0x02;  /* PCB: I-block, block_num=0, no CID, no NAD */
-    memcpy(&frame_buf[1], data, length);
-    crc_14a_append(frame_buf, length + 1);
-    uint8_t frame_len = length + 1 + 2;
-
-    NRF_LOG_INFO("14A4_READER_APDU: sending I-block, frame_len=%d", frame_len);
-
-    pcd_14a_reader_timeout_set(600);
-    resp_bits = 0;
-    status = pcd_14a_reader_bytes_transfer(PCD_TRANSCEIVE,
-                                           frame_buf, frame_len, resp_buf, &resp_bits, U8ARR_BIT_LEN(resp_buf));
+    uint8_t st = pcd_14a_reader_scan_auto(tag);
     pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
-
-    NRF_LOG_INFO("14A4_READER_APDU: APDU transfer status=%d resp_bits=%d", status, resp_bits);
-
-    if (status != STATUS_HF_TAG_OK || resp_bits < 8) {
-        uint8_t dbg[6] = {0x03, status, (uint8_t)frame_len,
-                          frame_buf[0], frame_buf[1], frame_buf[2]
-                         };
-        return data_frame_make(cmd, STATUS_HF_TAG_NO, 6, dbg);
+    if (st != STATUS_HF_TAG_OK) { cpu_close(); return st; }
+    if (!(tag->sak & 0x20) || !iso_dep_reader_init(&m_cpu_reader, tag->ats, tag->ats_len)) {
+        cpu_close();
+        return STATUS_PAR_ERR;
     }
-
-    uint8_t resp_bytes = resp_bits / 8;
-    if (resp_bytes < 3) {
-        uint8_t dbg[2] = {0x04, resp_bytes};
-        return data_frame_make(cmd, STATUS_HF_ERR_CRC, 2, dbg);
-    }
-
-    /* Verify first block CRC and begin chaining reassembly */
-    uint8_t crc_calc[2];
-    crc_14a_calculate(resp_buf, resp_bytes - 2, crc_calc);
-    if (resp_buf[resp_bytes - 2] != crc_calc[0] || resp_buf[resp_bytes - 1] != crc_calc[1]) {
-        return data_frame_make(cmd, STATUS_HF_ERR_CRC, resp_bytes, resp_buf);
-    }
-
-    /* Copy data portion (strip PCB + CRC), then handle chaining */
-    uint8_t resp_pcb = resp_buf[0];
-    uint8_t dlen = resp_bytes - 3; /* subtract PCB(1) + CRC(2) */
-    if (dlen > 0 && resp_chain_len + dlen < sizeof(resp_chain)) {
-        memcpy(&resp_chain[resp_chain_len], &resp_buf[1], dlen);
-        resp_chain_len += dlen;
-    }
-
-    /* ISO14443-4 chaining: PCB bit5 (0x20) set means more blocks follow */
-    while (resp_pcb & 0x20) {
-        uint8_t rack = 0xA2 | (resp_pcb & 0x01); /* R(ACK) block_num matches received I-block */
-        uint8_t rack_frame[3];
-        rack_frame[0] = rack;
-        crc_14a_append(rack_frame, 1);
-        resp_bits = 0;
-        pcd_14a_reader_timeout_set(600);
-        status = pcd_14a_reader_bytes_transfer(PCD_TRANSCEIVE,
-                                               rack_frame, 3, resp_buf, &resp_bits, U8ARR_BIT_LEN(resp_buf));
-        pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
-        if (status != STATUS_HF_TAG_OK || resp_bits < 24) break;
-        resp_bytes = resp_bits / 8;
-        crc_14a_calculate(resp_buf, resp_bytes - 2, crc_calc);
-        if (resp_buf[resp_bytes - 2] != crc_calc[0] || resp_buf[resp_bytes - 1] != crc_calc[1]) break;
-        resp_pcb = resp_buf[0];
-        dlen = resp_bytes - 3;
-        if (dlen > 0 && resp_chain_len + dlen < sizeof(resp_chain)) {
-            memcpy(&resp_chain[resp_chain_len], &resp_buf[1], dlen);
-            resp_chain_len += dlen;
-        }
-    }
-
-    return data_frame_make(cmd, STATUS_HF_TAG_OK, resp_chain_len, resp_chain);
+    m_cpu_active = true;
+    return STATUS_HF_TAG_OK;
 }
 
-/* -----------------------------------------------------------------------
- * tcl_apdu_: ISO 14443-4 APDU helper used by cmd_processor_hf14a_4_emv_scan.
- * Sends one I-block, receives full response handling card-side chaining.
- * ----------------------------------------------------------------------- */
-static bool tcl_apdu_(
-    const uint8_t *apdu, uint8_t apdu_sz,
-    uint8_t **rdata_ptr, uint16_t *rlen_ptr,
-    uint8_t *abuf, uint8_t *rbuf, uint8_t *chain_buf,
-    uint16_t *rbits_p, uint8_t *blk_p) {
-    /* Build I-block: PCB + APDU + CRC */
-    abuf[0] = 0x02 | (*blk_p & 0x01);
-    memcpy(&abuf[1], apdu, apdu_sz);
-    crc_14a_append(abuf, apdu_sz + 1);
-    uint8_t frame_len = apdu_sz + 3;   /* PCB + APDU + CRC */
-
-    /* Clear stale RxIRq before transmit.
-     * bytes_transfer only clears ComIrqReg bit7 (Set1).
-     * RxIRq (bit4) stays set from the previous receive and causes the
-     * wait-loop to exit instantly, returning garbage from FIFO. */
-    write_register_single(ComIrqReg, 0x7F);
-    pcd_14a_reader_timeout_set(600);
-    uint16_t rbits = 0;
-    uint8_t st = pcd_14a_reader_bytes_transfer(
-                     PCD_TRANSCEIVE, abuf, frame_len, rbuf, &rbits, 270u * 8u);
-    if (st != STATUS_HF_TAG_OK || rbits < 24u) return false;
-
-    uint16_t rb = rbits / 8u;
-    uint8_t crc[2];
-    crc_14a_calculate(rbuf, rb - 2u, crc);
-    if (rbuf[rb - 2] != crc[0] || rbuf[rb - 1] != crc[1]) return false;
-
-    *blk_p ^= 1;
-    uint8_t  resp_pcb  = rbuf[0];
-    uint16_t chain_len = 0;
-    uint8_t  dlen      = (uint8_t)(rb - 3u);
-    if (dlen > 0 && dlen < 512u) {
-        memcpy(chain_buf, &rbuf[1], dlen);
-        chain_len = dlen;
-    }
-
-    /* Handle card-side chaining ---------------------------------------- */
-    uint16_t chain_rbits = 0;   /* hoisted: used in both WTX and R(ACK) paths */
-    uint8_t  chain_st    = STATUS_HF_TAG_OK;
-    while (resp_pcb & 0x20u) {
-        if ((resp_pcb & 0xC0u) != 0x00u) {
-            /* S-block: handle S(WTX), reject others.
-             * Some Visa/MC cards send WTX (PCB=0xF2) before their FCI,
-             * requesting more processing time. We must echo it back.
-             * The WTXM byte was spuriously added to chain_buf — undo it. */
-            if ((resp_pcb & 0xF0u) == 0xF0u) {
-                chain_len -= dlen;       /* remove spurious WTXM byte(s) */
-                uint8_t wtx_r[4];
-                wtx_r[0] = resp_pcb;    /* mirror the S(WTX) PCB */
-                wtx_r[1] = rbuf[1];     /* WTXM from last received frame */
-                crc_14a_append(wtx_r, 2);
-                write_register_single(ComIrqReg, 0x7F);
-                pcd_14a_reader_timeout_set(600);
-                chain_rbits = 0;
-                chain_st = pcd_14a_reader_bytes_transfer(
-                               PCD_TRANSCEIVE, wtx_r, 4, rbuf, &chain_rbits, 270u * 8u);
-                if (chain_st != STATUS_HF_TAG_OK || chain_rbits < 24u) break;
-                rb = chain_rbits / 8u;
-                crc_14a_calculate(rbuf, rb - 2u, crc);
-                if (rbuf[rb - 2] != crc[0] || rbuf[rb - 1] != crc[1]) break;
-                resp_pcb = rbuf[0];
-                dlen = (uint8_t)(rb - 3u);
-                if (dlen > 0u && chain_len + dlen < 512u) {
-                    memcpy(&chain_buf[chain_len], &rbuf[1], dlen);
-                    chain_len += dlen;
-                }
-                continue; /* re-check while with new resp_pcb */
-            }
-            break; /* other S-blocks (DESELECT etc.): stop */
-        }
-
-        /* R(ACK) block_num must match the received I-block's block_num */
-        uint8_t rf[3];
-        rf[0] = 0xA2u | (resp_pcb & 0x01u);
-        crc_14a_append(rf, 1);
-
-        /* Use bytes_transfer for chain R(ACK) — clear stale RxIRq first */
-        write_register_single(ComIrqReg, 0x7F);
-        pcd_14a_reader_timeout_set(600);
-        chain_rbits = 0;
-        chain_st = pcd_14a_reader_bytes_transfer(
-                       PCD_TRANSCEIVE, rf, 3, rbuf, &chain_rbits, 270u * 8u);
-        if (chain_st != STATUS_HF_TAG_OK || chain_rbits < 24u) break;
-        rb = chain_rbits / 8u;   /* bytes_transfer returns BIT count */
-
-        crc_14a_calculate(rbuf, rb - 2u, crc);
-        if (rbuf[rb - 2] != crc[0] || rbuf[rb - 1] != crc[1]) break;
-
-        resp_pcb = rbuf[0];
-        dlen = (uint8_t)(rb - 3u);
-        if (dlen > 0u && chain_len + dlen < 512u) {
-            memcpy(&chain_buf[chain_len], &rbuf[1], dlen);
-            chain_len += dlen;
-        }
-    }
-
-    *rdata_ptr = chain_buf;
-    *rlen_ptr  = chain_len;
-    return chain_len > 0u;
+static bool cpu_transceive(void *context, const uint8_t *tx, uint16_t tx_size,
+        uint8_t *rx, uint16_t *rx_size, uint16_t timeout_ms) {
+    (void)context;
+    uint16_t bits = 0;
+    pcd_14a_reader_timeout_set(timeout_ms);
+    bsp_wdt_feed();
+    m_cpu_io_status = pcd_14a_reader_bytes_transfer(PCD_TRANSCEIVE,
+        (uint8_t *)tx, (uint8_t)tx_size, rx, &bits, *rx_size * 8);
+    pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
+    if (m_cpu_io_status != STATUS_HF_TAG_OK || (bits & 7)) return false;
+    *rx_size = bits / 8;
+    return true;
 }
 
-/**
- * HF14A-4 EMV scan — complete EMV card read in a single firmware call.
- *
- * Performs: field cycle → scan_auto (select+RATS) → PPSE → SELECT AID →
- * GPO → READ RECORDs, all without returning to the host between APDUs.
- *
- * Response format (packed, little-endian lengths):
- *   tag_info:    uid_len(1) uid(n) atqa(2) sak(1) ats_len(1) ats(m)
- *   num_apdus(1)
- *   for each APDU pair:
- *     cmd_len(1) cmd(n) resp_len(2 LE) resp(m)
- *
- * Returns STATUS_HF_TAG_NO if card not found.
- * Returns STATUS_HF_TAG_OK with packed data on success (partial data if
- * some APDUs fail — num_apdus reflects how many completed).
- */
-static data_frame_tx_t *cmd_processor_hf14a_4_emv_scan(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    static uint8_t out[NETDATA_MAX_DATA_LENGTH];
-    uint16_t out_len = 0;
+static uint8_t cpu_exchange(const uint8_t *apdu, uint16_t size, uint8_t *response,
+        uint16_t *response_size) {
+    iso_dep_result_t result = iso_dep_reader_exchange(&m_cpu_reader, apdu, size,
+        response, response_size, cpu_transceive, NULL);
+    if (result == ISO_DEP_OK) return STATUS_HF_TAG_OK;
+    cpu_close(); /* An uncertain exchange must never silently restart an authenticated session. */
+    return result == ISO_DEP_IO_ERROR ? m_cpu_io_status : STATUS_HF_ERR_STAT;
+}
 
-    /* ---- helpers -------------------------------------------------- */
-    static uint8_t  abuf[64];   /* TX frame: PCB + APDU + CRC */
-    static uint8_t  rbuf[270];  /* single-frame receive buffer: up to 256 bytes data + PCB + CRC + slack (FSDI=8 → FSD=256) */
-    static uint8_t  chain_buf[512]; /* reassembled chained response */
-    uint16_t rbits;
-    uint8_t  blk = 0;  /* alternating block number */
+/* 6007: 00=field off, 01=new select/RATS; response uses the usual scan format. */
+static data_frame_tx_t *cmd_processor_hf14a_4_session(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    if (length != 1 || data[0] > 1) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    if (data[0] == 0) {
+        cpu_close();
+        return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+    }
+    picc_14a_tag_t tag;
+    status = cpu_open(&tag);
+    if (status != STATUS_HF_TAG_OK) return data_frame_make(cmd, status, 0, NULL);
+    uint8_t out[272];
+    uint16_t n = 0;
+    out[n++] = tag.uid_len;
+    memcpy(out + n, tag.uid, tag.uid_len); n += tag.uid_len;
+    memcpy(out + n, tag.atqa, 2); n += 2;
+    out[n++] = tag.sak; out[n++] = tag.ats_len;
+    memcpy(out + n, tag.ats, tag.ats_len); n += tag.ats_len;
+    return data_frame_make(cmd, STATUS_HF_TAG_OK, n, out);
+}
 
-    /* SEND_APDU: thin wrapper that calls the static tcl_apdu_ helper. */
-#define SEND_APDU(ap, asz, rd, rl)         tcl_apdu_((ap),(asz),(rd),(rl),abuf,rbuf,chain_buf,&rbits,&blk)
+/* 6008: empty request returns count; index returns command + response (BE16). */
+static data_frame_tx_t *cmd_processor_hf14a_4_static_read(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    uint8_t out[1 + NFC_14A_4_MAX_STATIC_CMD_LEN + 2 + NFC_14A_4_MAX_APDU];
+    if (!length) {
+        out[0] = nfc_tag_14a_4_static_response_count();
+        return data_frame_make(cmd, STATUS_SUCCESS, 1, out);
+    }
+    if (length != 1) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    const uint8_t *command, *response;
+    uint8_t command_len;
+    uint16_t response_len;
+    if (!nfc_tag_14a_4_get_static_response(data[0], &command, &command_len, &response, &response_len))
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    out[0] = command_len;
+    memcpy(out + 1, command, command_len);
+    out[1 + command_len] = response_len >> 8;
+    out[2 + command_len] = response_len & 255;
+    memcpy(out + 3 + command_len, response, response_len);
+    return data_frame_make(cmd, STATUS_SUCCESS, 3 + command_len + response_len, out);
+}
 
+static data_frame_tx_t *cmd_processor_hf14a_4_reader_apdu(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    if (length < 4 || length > ISO_DEP_MAX_APDU) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    if (!m_cpu_active) {
+        picc_14a_tag_t tag;
+        status = cpu_open(&tag);
+        if (status != STATUS_HF_TAG_OK) return data_frame_make(cmd, status, 0, NULL);
+    }
+    static uint8_t response[512];
+    uint16_t size = sizeof(response);
+    status = cpu_exchange(data, length, response, &size);
+    return data_frame_make(cmd, status, status == STATUS_HF_TAG_OK ? size : 0, response);
+}
 
-
-    /* Append a cmd+resp pair to out buffer */
-#define APPEND_PAIR(cmd_ptr, cmd_sz, resp_ptr, resp_sz) do {         if (out_len + 1 + (cmd_sz) + 2 + (resp_sz) < NETDATA_MAX_DATA_LENGTH) {             out[out_len++] = (uint8_t)(cmd_sz);             memcpy(&out[out_len], (cmd_ptr), (cmd_sz)); out_len += (cmd_sz);             out[out_len++] = (uint8_t)((resp_sz) & 0xFF);             out[out_len++] = (uint8_t)((resp_sz) >> 8);             memcpy(&out[out_len], (resp_ptr), (resp_sz)); out_len += (resp_sz);         }     } while(0)
-
-    /* ---- Step 1: scan_auto ----------------------------------------- */
-    bsp_delay_ms(10);
-    static picc_14a_tag_t tag;
-    memset(&tag, 0, sizeof(tag));
-    status = pcd_14a_reader_scan_auto(&tag);
-    if (status != STATUS_HF_TAG_OK) {
-        bsp_delay_ms(20);
-        memset(&tag, 0, sizeof(tag));
-        status = pcd_14a_reader_scan_auto(&tag);
-        if (status != STATUS_HF_TAG_OK) {
-            return data_frame_make(cmd, STATUS_HF_TAG_NO, 0, NULL);
+/* Bounded BER-TLV traversal (including constructed FCI/GPO templates). */
+static bool cpu_tlv_find(const uint8_t *data, uint16_t size, uint32_t wanted,
+        const uint8_t **value, uint16_t *value_size, uint8_t depth) {
+    if (depth > 8) return false;
+    uint16_t off = 0;
+    while (off < size) {
+        uint8_t first = data[off++];
+        uint32_t tag = first;
+        if ((first & 31) == 31) {
+            uint8_t b, count = 0;
+            do {
+                if (off >= size || ++count > 2) return false;
+                b = data[off++]; tag = (tag << 8) | b;
+            } while (b & 128);
         }
-    }
-
-    /* After scan_auto completes RATS, give the RC522 time to settle.
-     * The hf14a_scan_keep + hf14a_raw path works because the USB round-trip
-     * (~2ms) gives the RC522 time to exit its post-receive state before
-     * the next transceive. Replicate that delay here. */
-    bsp_delay_ms(5);
-
-    /* ---- Clear RC522 stale state after RATS ----------------------- */
-    /* After scan_auto+RATS, CommandReg=0x0C (PCD_TRANSCEIVE) and
-     * ComIrqReg=0x64 (RxIRq+TxIRq+b6 set). bytes_transfer's wait loop
-     * reads ComIrqReg immediately after StartSend — if RxIRq is already
-     * set it exits before the PPSE frame is even transmitted.
-     *
-     * Fix sequence:
-     * 1. Idle the RC522 — stops active TRANSCEIVE state
-     * 2. Wait for CommandReg to confirm idle (RC522 state machine settles)
-     * 3. Clear all ComIrqReg interrupt flags
-     * 4. Flush FIFO and clear StartSend bit */
-    write_register_single(CommandReg, PCD_IDLE);
-    /* Spin until CommandReg confirms idle (usually immediate) */
-    {
-        uint16_t _w = 0;
-        while ((read_register_single(CommandReg) & 0x0F) != PCD_IDLE && _w++ < 1000);
-    }
-    write_register_single(ComIrqReg,  0x7F);          /* clear ALL IRQ flags */
-    set_register_mask(FIFOLevelReg,   0x80);          /* flush FIFO */
-    clear_register_mask(BitFramingReg, 0x80);         /* clear StartSend */
-
-    /* ---- Pack tag info ------------------------------------------- */
-    out[out_len++] = tag.uid_len;
-    memcpy(&out[out_len], tag.uid, tag.uid_len);
-    out_len += tag.uid_len;
-    memcpy(&out[out_len], tag.atqa, 2);
-    out_len += 2;
-    out[out_len++] = tag.sak;
-    out[out_len++] = tag.ats_len;
-    memcpy(&out[out_len], tag.ats, tag.ats_len);
-    out_len += tag.ats_len;
-
-    /* Placeholder for num_apdus — fill in at end */
-    uint16_t num_apdus_offset = out_len;
-    out[out_len++] = 0;
-    uint8_t num_apdus = 0;
-
-    pcd_14a_reader_timeout_set(600);
-
-    /* ---- Step 2: SELECT PPSE ------------------------------------- */
-    static const uint8_t ppse_cmd[] = {
-        0x00, 0xA4, 0x04, 0x00, 0x0E,
-        0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E,
-        0x44, 0x44, 0x46, 0x30, 0x31, 0x00
-    };
-    uint8_t *ppse_resp = NULL;
-    uint16_t ppse_rlen = 0;
-    {
-        bool _ppse_ok = SEND_APDU(ppse_cmd, sizeof(ppse_cmd), &ppse_resp, &ppse_rlen);
-        if (!_ppse_ok) {
-            goto done;
+        if (off >= size) return false;
+        uint32_t n = data[off++];
+        if (n & 128) {
+            uint8_t count = n & 127;
+            if (!count || count > 2 || count > size - off) return false;
+            n = 0;
+            while (count--) n = (n << 8) | data[off++];
         }
+        if (n > size - off) return false;
+        if (tag == wanted) { *value = data + off; *value_size = n; return true; }
+        if ((first & 32) && cpu_tlv_find(data + off, n, wanted, value, value_size, depth + 1)) return true;
+        off += n;
     }
-    APPEND_PAIR(ppse_cmd, sizeof(ppse_cmd), ppse_resp, ppse_rlen);
-    num_apdus++;
+    return false;
+}
 
-    /* ---- Re-establish T=CL after PPSE ----------------------------
-     * The PPSE exchange leaves the RC522 in an unknown internal state.
-     * Rather than trying to clear it piecemeal, do a full reset:
-     * turn the field off briefly, rescan the card, re-run RATS.
-     * This guarantees a clean RC522 state before SELECT AID.
-     * blk resets to 0 because a new T=CL session starts after RATS. */
-    pcd_14a_reader_antenna_off();
-    bsp_delay_ms(10);
-    {
-        picc_14a_tag_t tag2;
-        pcd_14a_reader_reset();
-        pcd_14a_reader_antenna_on();
-        bsp_delay_ms(8);
-        if (pcd_14a_reader_scan_auto(&tag2) != STATUS_HF_TAG_OK) goto done;
-    }
-    blk = 0;   /* new T=CL session: block number restarts at 0 */
+static bool cpu_sw_ok(const uint8_t *response, uint16_t size) {
+    return size >= 2 && response[size-2] == 0x90 && response[size-1] == 0;
+}
 
-    /* ---- Extract first AID from PPSE ----------------------------- */
-    uint8_t aid[16];
-    uint8_t aid_len = 0;
-    for (uint8_t i = 0; i + 1 < ppse_rlen; i++) {
-        if (ppse_resp[i] == 0x4F && ppse_resp[i + 1] > 0 && ppse_resp[i + 1] <= 16) {
-            aid_len = ppse_resp[i + 1];
-            memcpy(aid, &ppse_resp[i + 2], aid_len);
-            break;
-        }
-    }
-    if (aid_len == 0) goto done;
-
-    /* ---- Step 3: SELECT AID -------------------------------------- */
-    uint8_t sel_cmd[32];
-    uint8_t sel_len = 0;
-    sel_cmd[sel_len++] = 0x00;
-    sel_cmd[sel_len++] = 0xA4;
-    sel_cmd[sel_len++] = 0x04;
-    sel_cmd[sel_len++] = 0x00;
-    sel_cmd[sel_len++] = aid_len;
-    memcpy(&sel_cmd[sel_len], aid, aid_len);
-    sel_len += aid_len;
-    sel_cmd[sel_len++] = 0x00;
-
-    uint8_t *sel_resp;
-    uint16_t sel_rlen;
-    if (!SEND_APDU(sel_cmd, sel_len, &sel_resp, &sel_rlen)) goto done;
-    APPEND_PAIR(sel_cmd, sel_len, sel_resp, sel_rlen);
-    num_apdus++;
-
-    /* ---- Step 4: GPO — parse PDOL from SELECT AID FCI, fill zeros ------- */
-    /* PDOL is tag 9F38 in the FCI (sel_resp). Parse it to know how many
-     * bytes the card expects. Fill all fields with zeros (offline scan). */
-    uint8_t pdol_len = 0;
-    for (uint8_t pi = 0; pi + 2 < sel_rlen; pi++) {
-        /* 2-byte tag detection: first byte has bits[4:0] == 0x1F */
-        uint8_t ptag1 = sel_resp[pi];
-        uint8_t ptag2 = (((ptag1 & 0x1F) == 0x1F) && pi + 1 < sel_rlen) ? sel_resp[pi + 1] : 0;
-        uint16_t ftag = ((ptag1 & 0x1F) == 0x1F) ? (((uint16_t)ptag1 << 8) | ptag2) : ptag1;
-        uint8_t flen_off = (((ptag1 & 0x1F) == 0x1F)) ? 2 : 1;
-        if (pi + flen_off >= sel_rlen) break;
-        uint8_t flen = sel_resp[pi + flen_off];
-        if (ftag == 0x9F38) {
-            /* Sum DOL field lengths to get total PDOL data size */
-            uint8_t di = pi + flen_off + 1;
-            uint8_t dend = di + flen;
-            while (di < dend && di + 1 < sel_rlen) {
-                uint8_t dol_tl = ((sel_resp[di] & 0x1F) == 0x1F) ? 2 : 1;
-                if (di + dol_tl >= sel_rlen) break;
-                pdol_len += sel_resp[di + dol_tl];
-                di += dol_tl + 1;
+/* EMV discovery: PPSE -> first advertised AID -> exact PDOL -> validated AFL.
+ * Keep the existing packed response format; never invent PDOL lengths or return
+ * a partial transport frame as a successful APDU. */
+static data_frame_tx_t *cmd_processor_hf14a_4_emv_scan(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    static uint8_t out[NETDATA_MAX_DATA_LENGTH], response[512];
+    picc_14a_tag_t tag;
+    status = cpu_open(&tag);
+    if (status != STATUS_HF_TAG_OK) return data_frame_make(cmd, status, 0, NULL);
+    uint16_t n = 0;
+    out[n++] = tag.uid_len; memcpy(out + n, tag.uid, tag.uid_len); n += tag.uid_len;
+    memcpy(out + n, tag.atqa, 2); n += 2;
+    out[n++] = tag.sak; out[n++] = tag.ats_len;
+    memcpy(out + n, tag.ats, tag.ats_len); n += tag.ats_len;
+    uint16_t count_offset = n;
+    out[n++] = 0;
+    uint16_t size = 0;
+#define CPU_SCAN_APDU(ap, len) do { \
+        size = sizeof(response); \
+        if (cpu_exchange((ap), (len), response, &size) != STATUS_HF_TAG_OK) goto done; \
+        if ((uint32_t)n + 3 + (len) + size > sizeof(out) || out[count_offset] == 255) goto done; \
+        out[n++] = (len); memcpy(out + n, (ap), (len)); n += (len); \
+        out[n++] = size & 255; out[n++] = size >> 8; \
+        memcpy(out + n, response, size); n += size; out[count_offset]++; \
+    } while (0)
+    static const uint8_t ppse[] = {0,0xA4,4,0,14,'2','P','A','Y','.','S','Y','S','.','D','D','F','0','1',0};
+    CPU_SCAN_APDU(ppse, sizeof(ppse));
+    const uint8_t *value;
+    uint16_t value_size;
+    if (!cpu_sw_ok(response, size) || !cpu_tlv_find(response, size-2, 0x4F, &value, &value_size, 0) ||
+            value_size < 5 || value_size > 16) goto done;
+    uint8_t select[22] = {0,0xA4,4,0};
+    select[4] = value_size; memcpy(select+5, value, value_size); select[5+value_size] = 0;
+    uint8_t select_size = value_size + 6;
+    CPU_SCAN_APDU(select, select_size);
+    if (!cpu_sw_ok(response, size)) goto done;
+    uint8_t dol[128] = {0};
+    uint16_t dol_size = 0;
+    if (cpu_tlv_find(response, size-2, 0x9F38, &value, &value_size, 0)) {
+        uint16_t i = 0;
+        while (i < value_size) {
+            uint32_t field = value[i++];
+            if ((field & 31) == 31) {
+                uint8_t b, count = 0;
+                do {
+                    if (i >= value_size || ++count > 2) goto done;
+                    b = value[i++]; field = (field << 8) | b;
+                } while (b & 128);
             }
-            break;
-        }
-        if (flen_off + flen < 255) pi += flen_off + flen - 1;
-        else break;
-    }
-    /* ---- Step 5: GPO -----------------------------------------------
-     * Build GPO from parsed PDOL. pdol_len from FCI may be 0 if truncated.
-     * BUILD_GPO fills the PDOL data: TTQ = A0 00 00 00 for first 4 bytes
-     * (MSD+EMV contactless, offline, no DDA), rest zeros.
-     * TTQ=A0000000 is the lowest-security POS profile; Mastercard and Visa
-     * contactless cards respond to it even without a full terminal setup. */
-    static uint8_t gpo_buf[8 + 44]; /* static: keep off stack */
-    /* PDOL template: TTQ first 4 bytes, zeros after.
-     * TTQ A0000000: MSD+EMV contactless capable, offline, no CDA/DDA. */
-    static const uint8_t gpo_pdol_template[44] = {
-        0xA0, 0x00, 0x00, 0x00,  /* TTQ (9F66): MSD+cEMV, offline, no DDA */
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* Amount Authorised (9F02) */
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* Amount Other (9F03) */
-        0x02, 0x08,                           /* Country Code (9F1A): Norway */
-        0x00, 0x00, 0x00, 0x00, 0x00,         /* TVR (95) */
-        0x09, 0x78,                           /* Currency (5F2A): EUR */
-        0x25, 0x01, 0x01,                     /* Date (9A) */
-        0x00,                                 /* Transaction Type (9C) */
-        0x00, 0x00, 0x00, 0x00,               /* Unpredictable Number (9F37) */
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* extra zeros */
-        0x00, 0x00, 0x00
-    };
-    uint8_t gpo_len = 0;
-    uint8_t *gpo_resp = NULL;
-    uint16_t gpo_rlen = 0;
-    if (pdol_len > 44) pdol_len = 0;
-#define BUILD_GPO(pl) do { \
-        gpo_len = 0; \
-        gpo_buf[gpo_len++]=0x80; gpo_buf[gpo_len++]=0xA8; \
-        gpo_buf[gpo_len++]=0x00; gpo_buf[gpo_len++]=0x00; \
-        gpo_buf[gpo_len++]=(uint8_t)((pl)+2); \
-        gpo_buf[gpo_len++]=0x83; gpo_buf[gpo_len++]=(pl); \
-        memcpy(&gpo_buf[gpo_len], gpo_pdol_template, \
-               (pl) <= sizeof(gpo_pdol_template) ? (pl) : sizeof(gpo_pdol_template)); \
-        if ((pl) > sizeof(gpo_pdol_template)) \
-            memset(&gpo_buf[gpo_len + sizeof(gpo_pdol_template)], 0, \
-                   (pl) - sizeof(gpo_pdol_template)); \
-        gpo_len += (pl); \
-        gpo_buf[gpo_len++]=0x00; \
-    } while(0)
-#define GPO_OK(rp,rl) ((rl)>=2 && \
-        ((rp)[0]==0x77||(rp)[0]==0x80|| \
-         ((rp)[(rl)-2]==0x90&&(rp)[(rl)-1]==0x00)))
-    /* Attempt 1: use PDOL length from FCI (may be 0 if truncated) */
-    BUILD_GPO(pdol_len);
-    if (!SEND_APDU(gpo_buf, gpo_len, &gpo_resp, &gpo_rlen) ||
-            !GPO_OK(gpo_resp, gpo_rlen)) {
-        /* Attempt 2: try 4 bytes (TTQ only — some Visa/MC accept this) */
-        if (pdol_len != 4) {
-            BUILD_GPO(4);
-            if (SEND_APDU(gpo_buf, gpo_len, &gpo_resp, &gpo_rlen) &&
-                    GPO_OK(gpo_resp, gpo_rlen)) goto gpo_done;
-        }
-        /* Attempt 3: try 29 bytes (common Mastercard/Visa PDOL size) */
-        if (pdol_len != 29) {
-            BUILD_GPO(29);
-            if (SEND_APDU(gpo_buf, gpo_len, &gpo_resp, &gpo_rlen) &&
-                    GPO_OK(gpo_resp, gpo_rlen)) goto gpo_done;
-        }
-        /* Attempt 4: try 33 bytes (MC with Amount+Country+Currency fields) */
-        if (pdol_len != 33) {
-            BUILD_GPO(33);
-            if (SEND_APDU(gpo_buf, gpo_len, &gpo_resp, &gpo_rlen) &&
-                    GPO_OK(gpo_resp, gpo_rlen)) goto gpo_done;
-        }
-        /* Attempts 5-7: additional MC sizes (+TermType, +DataAuth, +IssuerAppData) */
-        {
-            static const uint8_t extra_pl[] = {34, 36, 38};
-            for (uint8_t ei = 0; ei < sizeof(extra_pl); ei++) {
-                uint8_t pl = extra_pl[ei];
-                if (pl == pdol_len || pl == 4 || pl == 29 || pl == 33) continue;
-                BUILD_GPO(pl);
-                if (SEND_APDU(gpo_buf, gpo_len, &gpo_resp, &gpo_rlen) &&
-                        GPO_OK(gpo_resp, gpo_rlen)) goto gpo_done;
-            }
-        }
-        goto done;  /* all attempts failed */
-    }
-gpo_done:
-#undef BUILD_GPO
-#undef GPO_OK
-    APPEND_PAIR(gpo_buf, gpo_len, gpo_resp, gpo_rlen);
-    num_apdus++;
-    uint8_t *afl = NULL;
-    uint8_t afl_len = 0;
-    if (gpo_rlen > 0 && gpo_resp[0] == 0x77) {
-        /* Format 2: find tag 94 */
-        for (uint8_t i = 2; i + 1 < gpo_rlen;) {
-            uint8_t t = gpo_resp[i];
-            uint8_t l = gpo_resp[i + 1];
-            if (t == 0x94) { afl = &gpo_resp[i + 2]; afl_len = l; break; }
-            i += 2 + l;
-        }
-    } else if (gpo_rlen > 3 && gpo_resp[0] == 0x80) {
-        afl = &gpo_resp[3];
-        afl_len = gpo_rlen - 3 - 2;
-    }
-    if (afl == NULL || afl_len == 0) goto done;
-
-    /* Copy AFL to local buffer before READ RECORDs.
-     * afl points into chain_buf which is overwritten by each SEND_APDU call.
-     * Without this copy, the 2nd+ AFL entries become garbage after the first
-     * READ RECORD, causing last=0xFF and up to 255 timeout loops per entry. */
-    static uint8_t afl_buf[32];  /* max 8 AFL entries × 4 bytes */
-    if (afl_len > sizeof(afl_buf)) afl_len = (uint8_t)sizeof(afl_buf);
-    memcpy(afl_buf, afl, afl_len);
-    afl = afl_buf;
-
-    /* READ each record */
-    for (uint8_t a = 0; a + 3 < afl_len; a += 4) {
-        uint8_t sfi    = (afl[a] >> 3) & 0x1F;
-        uint8_t rec_s  = afl[a + 1];
-        uint8_t rec_e  = afl[a + 2];
-        if (sfi == 0 || rec_s > rec_e) continue;
-        for (uint8_t r = rec_s; r <= rec_e; r++) {
-            uint8_t rr_cmd[5] = {0x00, 0xB2, r, (uint8_t)((sfi << 3) | 4), 0x00};
-            uint8_t *rr_resp;
-            uint16_t rr_rlen;
-            if (!SEND_APDU(rr_cmd, 5, &rr_resp, &rr_rlen)) {
-                /* RC522 FIFO is 64 bytes — records > 61 bytes fail.
-                 * Skip silently rather than aborting the whole scan. */
-                NRF_LOG_INFO("14A4_EMV_SCAN: READ RECORD SFI=%d rec=%d failed (response too large?)", sfi, r);
-                continue;
-            }
-            APPEND_PAIR(rr_cmd, 5, rr_resp, rr_rlen);
-            num_apdus++;
+            if (i >= value_size) goto done;
+            uint8_t field_size = value[i++];
+            if (field_size > sizeof(dol) - dol_size) goto done;
+            if (field == 0x9F66 && field_size == 4) dol[dol_size] = 0xA0;
+            dol_size += field_size;
         }
     }
-
+    uint8_t gpo[138] = {0x80,0xA8,0,0};
+    uint8_t g = 5;
+    gpo[g++] = 0x83;
+    if (dol_size >= 128) gpo[g++] = 0x81;
+    gpo[g++] = dol_size;
+    memcpy(gpo+g, dol, dol_size); g += dol_size;
+    gpo[4] = g - 5; gpo[g++] = 0;
+    CPU_SCAN_APDU(gpo, g);
+    if (!cpu_sw_ok(response, size)) goto done;
+    if (!cpu_tlv_find(response, size-2, 0x94, &value, &value_size, 0)) {
+        if (!cpu_tlv_find(response, size-2, 0x80, &value, &value_size, 0) || value_size < 2) goto done;
+        value += 2; value_size -= 2; /* skip AIP in response format 1 */
+    }
+    if (!value_size || value_size > 128 || (value_size & 3)) goto done;
+    uint8_t afl[128]; memcpy(afl, value, value_size);
+    for (uint16_t a = 0; a < value_size; a += 4) {
+        uint8_t sfi = afl[a] >> 3;
+        if ((afl[a] & 7) || !sfi || sfi > 30 || !afl[a+1] || afl[a+1] > afl[a+2] ||
+                afl[a+3] > afl[a+2] - afl[a+1] + 1) goto done;
+        for (uint16_t record = afl[a+1]; record <= afl[a+2]; record++) {
+            uint8_t read_record[] = {0,0xB2,record,(sfi << 3) | 4,0};
+            CPU_SCAN_APDU(read_record, sizeof(read_record));
+        }
+    }
 done:
-    pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
-    out[num_apdus_offset] = num_apdus;
-    /* Return HF_TAG_OK even with 0 APDUs so Python can see tag info */
-    return data_frame_make(cmd, STATUS_HF_TAG_OK, out_len, out);
+#undef CPU_SCAN_APDU
+    cpu_close();
+    return data_frame_make(cmd, STATUS_HF_TAG_OK, n, out);
 }
+
 
 static data_frame_tx_t *cmd_processor_hf14a_4_debug_counters(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
     uint8_t buf[4];
@@ -3392,7 +3099,9 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_HF14A_4_APDU_SEND,              NULL,                        cmd_processor_hf14a_4_apdu_send,             NULL                   },
     {    DATA_CMD_HF14A_4_SET_ANTI_COLL,          NULL,                        cmd_processor_hf14a_4_set_anti_coll,         NULL                   },
     {    DATA_CMD_HF14A_4_STATIC_RESP,            NULL,                        cmd_processor_hf14a_4_static_resp,           NULL                   },
-    {    DATA_CMD_HF14A_4_READER_APDU,            before_hf_reader_run,        cmd_processor_hf14a_4_reader_apdu,           NULL                   },
+    {    DATA_CMD_HF14A_4_READER_APDU,            before_reader_run,        cmd_processor_hf14a_4_reader_apdu,           NULL                   },
+    {    DATA_CMD_HF14A_4_SESSION,                before_reader_run,           cmd_processor_hf14a_4_session,               NULL                   },
+    {    DATA_CMD_HF14A_4_STATIC_READ,            NULL,                        cmd_processor_hf14a_4_static_read,           NULL                   },
     {    DATA_CMD_HF14A_4_EMV_SCAN,               before_hf_reader_run,        cmd_processor_hf14a_4_emv_scan,              NULL                   },
     {    6010,                                     NULL,                        cmd_processor_hf14a_4_debug_counters,        NULL                   },
     /* HF14A scan keeping field alive */

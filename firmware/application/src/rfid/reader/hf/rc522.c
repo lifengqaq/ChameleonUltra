@@ -287,7 +287,7 @@ uint8_t pcd_14a_reader_bytes_transfer(uint8_t Command, uint8_t *pIn, uint8_t InL
     }
 
     write_register_single(CommandReg,       PCD_IDLE);      //  Flushbuffer clearing the internal FIFO read and writing pointer and ErRreg's Bufferovfl logo position is cleared
-    clear_register_mask(ComIrqReg,      0x80);          //  When Set1 is cleared, the shielding position of commonricqreg is clear zero
+    write_register_single(ComIrqReg,    0x7F);          //  When Set1 is cleared, the shielding position of commonricqreg is clear zero
     set_register_mask(FIFOLevelReg,     0x80);          //  Write an empty order
 
     write_register_buffer(FIFODataReg, pIn, InLenByte); // Write data into FIFODATA
@@ -524,7 +524,7 @@ uint8_t pcd_14a_reader_bytes_transfer_flags(uint8_t Command, uint8_t *pIn, uint8
     }
 
     write_register_single(CommandReg,       PCD_IDLE);      //  Flushbuffer clearing the internal FIFO read and writing pointer and ErRreg's Bufferovfl logo position is cleared
-    clear_register_mask(ComIrqReg,      0x80);          //  When Set1 is cleared, the shielding position of commonricqreg is clear zero
+    write_register_single(ComIrqReg,    0x7F);          //  When Set1 is cleared, the shielding position of commonricqreg is clear zero
     set_register_mask(FIFOLevelReg,     0x80);          //  Write an empty order
 
     write_register_buffer(FIFODataReg, pIn, InLenByte); // Write data into FIFODATA
