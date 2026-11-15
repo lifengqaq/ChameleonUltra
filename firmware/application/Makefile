@@ -31,6 +31,7 @@ SRC_FILES += \
   $(PROJ_DIR)/rfid/nfctag/hf/nfc_14a.c \
   $(PROJ_DIR)/rfid/nfctag/hf/nfc_14a_4.c \
   $(PROJ_DIR)/rfid/nfctag/hf/iso14443_4.c \
+  $(PROJ_DIR)/rfid/nfctag/hf/iso7816_fs.c \
   $(PROJ_DIR)/rfid/nfctag/hf/nfc_mf1.c \
   $(PROJ_DIR)/rfid/nfctag/hf/nfc_mf0_ntag.c \
   $(PROJ_DIR)/rfid/nfctag/hf/nfc_seos.c \

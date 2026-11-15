@@ -13,6 +13,7 @@
 #include <string.h>
 #include "app_util_platform.h"
 #include "nfc_14a_4.h"
+#include "iso7816_fs.h"
 #include "nfc_14a.h"
 #include "tag_emulation.h"
 #include "tag_persistence.h"
@@ -53,6 +54,18 @@ typedef struct {
 } nfc_tag_14a_4_large_response_t;
 static nfc_tag_14a_4_large_response_t m_large_resp[NFC_14A_4_MAX_LARGE_RESPONSES];
 static uint8_t m_large_resp_count = 0;
+
+/* Reuse the 3252-byte static-table payload as a versioned filesystem image.
+ * Only an explicit marker selects this interpretation; legacy slots survive. */
+_Static_assert(sizeof(((nfc_tag_14a_4_information_t *)0)->static_resp) == ISO7816_FS_MAX_IMAGE,
+    "Filesystem capacity must match the existing slot payload");
+static iso7816_fs_t m_filesystem;
+static uint8_t m_fs_upload[ISO7816_FS_MAX_IMAGE];
+static uint16_t m_fs_upload_length, m_fs_upload_received;
+static bool filesystem_mode(void) {
+    return m_tag_information && m_tag_information->static_resp_count == NFC_14A_4_FS_MARKER;
+}
+
 
 /* ------------------------------------------------------------------ */
 /*  Static response table                                               */
@@ -103,6 +116,7 @@ static bool add_static_response_unlocked(const uint8_t *cmd, uint8_t cmd_len,
 bool nfc_tag_14a_4_add_static_response(const uint8_t *cmd, uint8_t cmd_len,
         const uint8_t *resp, uint16_t resp_len) {
     bool result;
+    if (filesystem_mode()) return false;
     CRITICAL_REGION_ENTER();
     result = add_static_response_unlocked(cmd, cmd_len, resp, resp_len);
     CRITICAL_REGION_EXIT();
@@ -135,8 +149,67 @@ void nfc_tag_14a_4_clear_static_responses(void) {
     m_large_resp_count  = 0;
     if (m_tag_information) {
         m_tag_information->static_resp_count = 0;
+        memset(m_tag_information->static_resp, 0, sizeof(m_tag_information->static_resp));
     }
+    memset(&m_filesystem, 0, sizeof(m_filesystem));
+    m_fs_upload_length = m_fs_upload_received = 0;
     CRITICAL_REGION_EXIT();
+}
+
+bool nfc_tag_14a_4_filesystem_command(const uint8_t *data, uint16_t length,
+        uint8_t *out, uint16_t *out_length) {
+    *out_length = 0;
+    if (!m_tag_information || !length) return false;
+    uint16_t offset, count;
+    switch (data[0]) {
+        case 0: /* protocol version, active mode, capacity, active image length */
+            if (length != 1) return false;
+            out[0] = 1; out[1] = filesystem_mode() ? 1 : 0;
+            out[2] = (uint8_t)(ISO7816_FS_MAX_IMAGE >> 8); out[3] = (uint8_t)ISO7816_FS_MAX_IMAGE;
+            count = filesystem_mode() && m_filesystem.image ? m_filesystem.length : 0;
+            out[4] = (uint8_t)(count >> 8); out[5] = (uint8_t)count;
+            *out_length = 6; return true;
+        case 1: /* read a committed image chunk */
+            if (length != 4 || !filesystem_mode() || !m_filesystem.image) return false;
+            offset = (uint16_t)((data[1] << 8) | data[2]); count = data[3];
+            if (!count || count > 200 || (uint32_t)offset + count > m_filesystem.length) return false;
+            CRITICAL_REGION_ENTER();
+            memcpy(out, m_filesystem.image + offset, count);
+            CRITICAL_REGION_EXIT();
+            *out_length = count; return true;
+        case 2: /* begin staging; no active data is changed */
+            if (length != 3) return false;
+            count = (uint16_t)((data[1] << 8) | data[2]);
+            if (count < 8 || count > ISO7816_FS_MAX_IMAGE) return false;
+            m_fs_upload_length = count; m_fs_upload_received = 0;
+            return true;
+        case 3: /* contiguous upload chunks, including an exact offset */
+            if (length < 4 || length > 203 || !m_fs_upload_length) return false;
+            offset = (uint16_t)((data[1] << 8) | data[2]); count = length - 3;
+            if (offset != m_fs_upload_received || (uint32_t)offset + count > m_fs_upload_length) return false;
+            memcpy(m_fs_upload + offset, data + 3, count);
+            m_fs_upload_received += count; return true;
+        case 4: /* validate, then atomically replace the active interpretation */
+            if (length != 1 || !m_fs_upload_length || m_fs_upload_received != m_fs_upload_length ||
+                    !iso7816_fs_validate(m_fs_upload, m_fs_upload_length)) return false;
+            CRITICAL_REGION_ENTER();
+            memset(m_tag_information->static_resp, 0, sizeof(m_tag_information->static_resp));
+            memcpy(m_tag_information->static_resp, m_fs_upload, m_fs_upload_length);
+            m_tag_information->static_resp_count = NFC_14A_4_FS_MARKER;
+            m_static_resp_count = m_large_resp_count = 0;
+            (void)iso7816_fs_open(&m_filesystem, (uint8_t *)m_tag_information->static_resp, m_fs_upload_length);
+            iso_dep_picc_reset(&m_tcl_session_state);
+            m_fs_upload_length = m_fs_upload_received = 0;
+            CRITICAL_REGION_EXIT();
+            return true;
+        case 5:
+            if (length != 1) return false;
+            m_fs_upload_length = m_fs_upload_received = 0; return true;
+        case 6:
+            if (length != 1) return false;
+            nfc_tag_14a_4_clear_static_responses(); return true;
+        default: return false;
+    }
 }
 
 static bool find_static_response(const uint8_t *apdu, uint16_t apdu_len,
@@ -173,6 +246,7 @@ bool nfc_tag_14a_4_base_handler(nfc_tag_14a_4_tcl_state_t *s, uint8_t *data, uin
 
 static void nfc_tag_14a_4_rats(uint8_t parameter) {
     iso_dep_picc_rats(&m_tcl_session_state, parameter);
+    if (m_filesystem.image) iso7816_fs_reset(&m_filesystem);
 }
 
 static void nfc_tag_14a_4_state_handler(uint8_t *data, uint16_t szBits) {
@@ -181,7 +255,17 @@ static void nfc_tag_14a_4_state_handler(uint8_t *data, uint16_t szBits) {
     if (!nfc_tag_14a_checks_crc(data, szBytes)) return;
     szBytes -= 2; /* RF callback counts bits and includes CRC_A. */
     if (!nfc_tag_14a_4_base_handler(&m_tcl_session_state, data, szBytes)) return;
-    
+
+    if (filesystem_mode()) {
+        m_tcl_session_state.m_resp_len = iso7816_fs_exchange(&m_filesystem,
+            m_tcl_session_state.m_apdu_buf, m_tcl_session_state.m_apdu_len,
+            m_tcl_session_state.m_resp_buf, sizeof(m_tcl_session_state.m_resp_buf));
+        m_tcl_session_state.m_apdu_pending = false;
+        m_tcl_session_state.m_response_ready = true;
+        m_dbg_iblocks_rx++; m_dbg_iblocks_tx++; m_dbg_last_match = 2;
+        nfc_tag_14a_4_base_respond(&m_tcl_session_state);
+        return;
+    }
     /* APDU complete — check static table first, then WTX */
     const uint8_t *static_resp = NULL;
     uint16_t  static_len  = 0;
@@ -251,6 +335,7 @@ void nfc_tag_14a_4_reset_state(nfc_tag_14a_4_tcl_state_t *m_tcl_session_state) {
 
 void nfc_tag_14a_4_reset_handler(void) {
     nfc_tag_14a_4_reset_state(&m_tcl_session_state);
+    if (m_filesystem.image) iso7816_fs_reset(&m_filesystem);
 }
 
 void nfc_tag_14a_4_get_debug_counters(uint8_t *rx, uint8_t *tx,
@@ -290,18 +375,28 @@ int nfc_tag_14a_4_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffe
 
     m_large_resp_count = 0; /* Never leak volatile responses across slots. */
     nfc_tag_14a_4_reset_handler();
-    /* Populate RAM static table from persisted slot data */
-    m_static_resp_count = m_tag_information->static_resp_count;
-    if (m_static_resp_count > NFC_14A_4_MAX_STATIC_RESPONSES)
-        m_static_resp_count = NFC_14A_4_MAX_STATIC_RESPONSES;
-    memcpy(m_static_resp, m_tag_information->static_resp,
-           m_static_resp_count * sizeof(nfc_tag_14a_4_static_response_t));
+    memset(&m_filesystem, 0, sizeof(m_filesystem));
+    m_fs_upload_length = m_fs_upload_received = 0;
+    m_static_resp_count = 0;
+    if (filesystem_mode()) {
+        uint8_t *volume = (uint8_t *)m_tag_information->static_resp;
+        uint16_t length = (uint16_t)((volume[6] << 8) | volume[7]);
+        if (!iso7816_fs_open(&m_filesystem, volume, length))
+            NRF_LOG_ERROR("14A-4 invalid filesystem image");
+    } else {
+        /* Populate RAM static table from persisted slot data */
+        m_static_resp_count = m_tag_information->static_resp_count;
+        if (m_static_resp_count > NFC_14A_4_MAX_STATIC_RESPONSES)
+            m_static_resp_count = NFC_14A_4_MAX_STATIC_RESPONSES;
+        memcpy(m_static_resp, m_tag_information->static_resp,
+               m_static_resp_count * sizeof(nfc_tag_14a_4_static_response_t));
 
-    for (uint8_t i = 0; i < m_static_resp_count; i++) {
-        if (!m_static_resp[i].cmd_len || m_static_resp[i].cmd_len > NFC_14A_4_MAX_STATIC_CMD_LEN ||
-                m_static_resp[i].resp_len < 2 || m_static_resp[i].resp_len > NFC_14A_4_MAX_STATIC_RESP_LEN) {
-            m_static_resp_count = 0;
-            break;
+        for (uint8_t i = 0; i < m_static_resp_count; i++) {
+            if (!m_static_resp[i].cmd_len || m_static_resp[i].cmd_len > NFC_14A_4_MAX_STATIC_CMD_LEN ||
+                    m_static_resp[i].resp_len < 2 || m_static_resp[i].resp_len > NFC_14A_4_MAX_STATIC_RESP_LEN) {
+                m_static_resp_count = 0;
+                break;
+            }
         }
     }
     nfc_tag_14a_handler_t handler = {

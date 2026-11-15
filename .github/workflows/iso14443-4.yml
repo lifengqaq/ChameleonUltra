@@ -6,6 +6,8 @@ on:
     paths:
       - 'firmware/application/src/rfid/nfctag/hf/iso14443_4.*'
       - 'tests/iso14443_4_test.c'
+      - 'firmware/application/src/rfid/nfctag/hf/iso7816_fs.*'
+      - 'tests/iso7816_fs_test.c'
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,3 +24,11 @@ jobs:
           tests/iso14443_4_test.c -o /tmp/iso14443_4_test
       - name: Run protocol regression fixtures
         run: /tmp/iso14443_4_test
+      - name: Compile filesystem tests with sanitizers
+        run: >-
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g
+          -Ifirmware/application/src/rfid/nfctag/hf
+          firmware/application/src/rfid/nfctag/hf/iso7816_fs.c
+          tests/iso7816_fs_test.c -o /tmp/iso7816_fs_test
+      - name: Run filesystem selection, mutation and malformed APDU fixtures
+        run: /tmp/iso7816_fs_test

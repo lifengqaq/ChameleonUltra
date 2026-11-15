@@ -2774,6 +2774,14 @@ static data_frame_tx_t *cmd_processor_hf14a_4_session(uint16_t cmd, uint16_t sta
     return data_frame_make(cmd, STATUS_HF_TAG_OK, n, out);
 }
 
+/* 6009: atomic CFS1 file-image management; chunks are at most 200 bytes. */
+static data_frame_tx_t *cmd_processor_hf14a_4_filesystem(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    uint8_t out[200]; uint16_t size = 0;
+    bool valid = nfc_tag_14a_4_filesystem_command(data, length, out, &size);
+    return data_frame_make(cmd, valid ? STATUS_SUCCESS : STATUS_PAR_ERR, valid ? size : 0, out);
+}
+
 /* 6008: empty request returns count; index returns command + response (BE16). */
 static data_frame_tx_t *cmd_processor_hf14a_4_static_read(uint16_t cmd, uint16_t status,
         uint16_t length, uint8_t *data) {
@@ -3111,6 +3119,7 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_HF14A_4_STATIC_RESP,            before_hf14a_4_emulator,                        cmd_processor_hf14a_4_static_resp,           NULL                   },
     {    DATA_CMD_HF14A_4_READER_APDU,            before_reader_run,        cmd_processor_hf14a_4_reader_apdu,           NULL                   },
     {    DATA_CMD_HF14A_4_SESSION,                before_reader_run,           cmd_processor_hf14a_4_session,               NULL                   },
+    {    DATA_CMD_HF14A_4_FILESYSTEM,             before_hf14a_4_emulator,   cmd_processor_hf14a_4_filesystem,            NULL                   },
     {    DATA_CMD_HF14A_4_STATIC_READ,            before_hf14a_4_emulator,                        cmd_processor_hf14a_4_static_read,           NULL                   },
     {    DATA_CMD_HF14A_4_EMV_SCAN,               before_hf_reader_run,        cmd_processor_hf14a_4_emv_scan,              NULL                   },
     {    6010,                                     NULL,                        cmd_processor_hf14a_4_debug_counters,        NULL                   },

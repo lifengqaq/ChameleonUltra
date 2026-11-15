@@ -23,6 +23,7 @@
 
 /* Static APDU response table — up to 12 pre-configured command/response pairs.
  * Loaded before field activation; firmware responds autonomously without USB. */
+#define NFC_14A_4_FS_MARKER 0xFEu
 #define NFC_14A_4_MAX_STATIC_RESPONSES  12
 #define NFC_14A_4_MAX_LARGE_RESPONSES   4    /* RAM-only, for resp > 253 bytes   */
 #define NFC_14A_4_MAX_LARGE_RESP_LEN    260  /* max large response size          */
@@ -71,6 +72,10 @@ void nfc_tag_14a_4_clear_static_responses(void);
 uint8_t nfc_tag_14a_4_static_response_count(void);
 bool nfc_tag_14a_4_get_static_response(uint8_t index, const uint8_t **cmd,
     uint8_t *cmd_len, const uint8_t **response, uint16_t *response_len);
+
+/* Atomic CFS1 upload/readback. The slot layout size remains unchanged. */
+bool nfc_tag_14a_4_filesystem_command(const uint8_t *data, uint16_t length,
+    uint8_t *out, uint16_t *out_length);
 
 /* APDU relay — host-driven responses */
 bool nfc_tag_14a_4_get_pending_apdu(uint8_t *buf, uint16_t *length);
