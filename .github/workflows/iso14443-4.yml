@@ -28,7 +28,19 @@ jobs:
         run: >-
           cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g
           -Ifirmware/application/src/rfid/nfctag/hf
+          -Ifirmware/application/src/rfid/crypto
           firmware/application/src/rfid/nfctag/hf/iso7816_fs.c
+          firmware/application/src/rfid/crypto/ulc_3des.c
           tests/iso7816_fs_test.c -o /tmp/iso7816_fs_test
       - name: Run filesystem selection, mutation and malformed APDU fixtures
         run: /tmp/iso7816_fs_test
+
+      - name: Compile PIN and key authentication regression tests
+        run: >-
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g
+          -Ifirmware/application/src/rfid/nfctag/hf -Ifirmware/application/src/rfid/crypto
+          firmware/application/src/rfid/nfctag/hf/iso7816_fs.c
+          firmware/application/src/rfid/crypto/ulc_3des.c
+          tests/iso7816_security_test.c -o /tmp/iso7816_security_test
+      - name: Verify authentication, failed-attempt counters and RF reset behavior
+        run: /tmp/iso7816_security_test

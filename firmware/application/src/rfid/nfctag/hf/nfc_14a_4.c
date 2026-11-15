@@ -19,6 +19,11 @@
 #include "tag_persistence.h"
 #include "fds_util.h"
 #include "nrf_log.h"
+#include "nrf_drv_rng.h"
+
+static bool filesystem_random(uint8_t *out, uint8_t length) {
+    return nrf_drv_rng_rand(out, length) == NRF_SUCCESS;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Module state                                                        */
@@ -198,6 +203,7 @@ bool nfc_tag_14a_4_filesystem_command(const uint8_t *data, uint16_t length,
             m_tag_information->static_resp_count = NFC_14A_4_FS_MARKER;
             m_static_resp_count = m_large_resp_count = 0;
             (void)iso7816_fs_open(&m_filesystem, (uint8_t *)m_tag_information->static_resp, m_fs_upload_length);
+            m_filesystem.random = filesystem_random;
             iso_dep_picc_reset(&m_tcl_session_state);
             m_fs_upload_length = m_fs_upload_received = 0;
             CRITICAL_REGION_EXIT();
@@ -208,6 +214,9 @@ bool nfc_tag_14a_4_filesystem_command(const uint8_t *data, uint16_t length,
         case 6:
             if (length != 1) return false;
             nfc_tag_14a_4_clear_static_responses(); return true;
+        case 7: /* maximum CFS image version, supported PIN + DES/2-key-3DES */
+            if (length != 1) return false;
+            out[0] = 2; out[1] = 3; *out_length = 2; return true;
         default: return false;
     }
 }
@@ -383,6 +392,7 @@ int nfc_tag_14a_4_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffe
         uint16_t length = (uint16_t)((volume[6] << 8) | volume[7]);
         if (!iso7816_fs_open(&m_filesystem, volume, length))
             NRF_LOG_ERROR("14A-4 invalid filesystem image");
+        m_filesystem.random = filesystem_random;
     } else {
         /* Populate RAM static table from persisted slot data */
         m_static_resp_count = m_tag_information->static_resp_count;

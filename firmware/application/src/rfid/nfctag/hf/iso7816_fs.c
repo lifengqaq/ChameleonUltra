@@ -1,4 +1,5 @@
 #include "iso7816_fs.h"
+#include "ulc_3des.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -12,12 +13,14 @@ static uint16_t result(uint8_t *out, uint16_t size, uint16_t status) {
 void iso7816_fs_reset(iso7816_fs_t *fs) {
     fs->selected_df = 0; fs->selected_ef = ISO7816_FS_NONE;
     fs->current_record = 0; fs->pending_length = fs->pending_offset = 0;
+    fs->pin_authenticated = fs->key_authenticated = fs->challenge_valid = false;
+    memset(fs->challenge, 0, sizeof(fs->challenge));
 }
 
 bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
     memset(fs, 0, sizeof(*fs));
     if (!image || length < 8 || length > ISO7816_FS_MAX_IMAGE ||
-            memcmp(image, "CFS1", 4) || image[4] != 1 || !image[5] ||
+            memcmp(image, "CFS1", 4) || (image[4] != 1 && image[4] != 2) || !image[5] ||
             image[5] > ISO7816_FS_MAX_NODES || be16(image + 6) != length) return false;
     uint32_t offset = 8;
     for (uint8_t i = 0; i < image[5]; i++) {
@@ -30,7 +33,7 @@ bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
         n->record_length = be16(p + 11);
         offset += 13;
         if (n->type > ISO7816_FS_RECORDS || !n->fid || n->fid == 0x3FFF ||
-                n->sfi > 30 || n->access > 3 || n->aid_length > 16 ||
+                n->sfi > 30 || n->access > (image[4] == 2 ? 63 : 3) || n->aid_length > 16 ||
                 (n->aid_length && n->aid_length < 5) || n->fci_length > ISO7816_FS_MAX_FCI ||
                 offset + n->aid_length + n->fci_length + n->data_length > length) return false;
         if (i == 0) {
@@ -57,6 +60,25 @@ bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
             if (n->aid_length && n->aid_length == other->aid_length &&
                     !memcmp(image + n->aid_offset, image + other->aid_offset, n->aid_length)) return false;
         }
+    }
+    if (image[4] == 2) {
+        if (offset + ISO7816_FS_SECURITY_SIZE != length || memcmp(image + offset, "SEC1", 4)) return false;
+        const uint8_t *sec = image + offset;
+        if (sec[10] > 12 || (sec[10] && sec[10] < 4) ||
+                (sec[11] != 0 && sec[11] != 8 && sec[11] != 16) ||
+                sec[6] > 15 || sec[7] > 15 || sec[8] > sec[6] || sec[9] > sec[7] ||
+                (sec[10] ? !sec[6] : (sec[6] || sec[8])) ||
+                (sec[11] ? !sec[7] : (sec[7] || sec[9])) ||
+                (!sec[10] && !sec[11]) || sec[40] > 2 || sec[42] || sec[43]) return false;
+        for (uint8_t j = 0; j < sec[10]; j++) if (sec[12+j] < '0' || sec[12+j] > '9') return false;
+        for (uint8_t j = 0; j < image[5]; j++) {
+            const uint8_t a = fs->nodes[j].access;
+            if (((a & 20) && !(a & ISO7816_FS_READ)) || ((a & 40) && !(a & ISO7816_FS_WRITE)) ||
+                    ((a & 4) && (a & 16)) || ((a & 8) && (a & 32)) ||
+                    ((a & 12) && !sec[10]) || ((a & 48) && !sec[11])) return false;
+        }
+        fs->security_offset = (uint16_t)offset;
+        offset += ISO7816_FS_SECURITY_SIZE;
     }
     if (offset != length) return false;
     fs->image = image; fs->length = length; fs->count = image[5];
@@ -119,6 +141,11 @@ static uint16_t control_info(iso7816_fs_t *fs, uint8_t index, bool fcp, uint8_t 
     if (n->type != ISO7816_FS_DF) {
         f[k++] = 0x80; f[k++] = 2; f[k++] = (uint8_t)(n->data_length >> 8); f[k++] = (uint8_t)n->data_length;
     }
+    if (fs->security_offset && n->type != ISO7816_FS_DF) {
+        f[k++] = 0x86; f[k++] = 2;
+        f[k++] = !(n->access & 1) ? 0xFF : n->access & 4 ? 1 : n->access & 16 ? 2 : 0;
+        f[k++] = !(n->access & 2) ? 0xFF : n->access & 8 ? 1 : n->access & 32 ? 2 : 0;
+    }
     uint16_t pos = 0;
     if (!fcp) {
         out[pos++] = 0x6F; out[pos++] = (uint8_t)(k + 2 + (n->aid_length ? n->aid_length + 2 : 0));
@@ -170,6 +197,9 @@ static uint16_t select_file(iso7816_fs_t *fs, const apdu_t *a, uint8_t *out, uin
         memcpy(out, fs->pending, count); fs->pending_offset = count;
     }
     if (fs->nodes[target].type == ISO7816_FS_DF) {
+        if (fs->selected_df != target) {
+            fs->pin_authenticated = fs->key_authenticated = false;
+        }
         fs->selected_df = target; fs->selected_ef = ISO7816_FS_NONE;
     } else {
         fs->selected_df = fs->nodes[target].parent; fs->selected_ef = target;
@@ -182,6 +212,70 @@ static uint16_t select_file(iso7816_fs_t *fs, const apdu_t *a, uint8_t *out, uin
     return result(out, sent, remaining ? (uint16_t)(0x6100 | remaining) : 0x9000);
 }
 
+
+/* CFS1 v2 SEC1 trailer: references, limits, live counters, PIN/key lengths,
+ * 12-byte decimal PIN, 16-byte key, PIN encoding, algorithm reference, 00 00.
+ * Credentials are provisioned by the owner; this is not DESFire/EMV SDA/DDA. */
+static uint16_t authentication(iso7816_fs_t *fs, const apdu_t *a, uint8_t *out, uint16_t cap) {
+    if (!fs->security_offset) return sw(out, 0x6D00);
+    uint8_t *sec = fs->image + fs->security_offset;
+    if (a->ins == 0x84) {
+        fs->challenge_valid = false;
+        if (!sec[11]) return sw(out, 0x6D00);
+        if (a->p1 || a->p2 || a->lc || !a->has_le || a->le != 8) return sw(out, 0x6A86);
+        if (!sec[9]) return sw(out, 0x6983);
+        if (cap < 10) return sw(out, 0x6700);
+        if (!fs->random || !fs->random(fs->challenge, 8)) return sw(out, 0x6985);
+        memcpy(out, fs->challenge, 8); fs->challenge_valid = true;
+        return result(out, 8, 0x9000);
+    }
+    const bool pin = a->ins == 0x20;
+    const uint8_t length = sec[pin ? 10 : 11];
+    if (!length) return sw(out, 0x6D00);
+    if (a->p1 != (pin ? 0 : sec[41]) || a->p2 != sec[pin ? 4 : 5]) return sw(out, 0x6A88);
+    if (!a->lc || a->has_le) return sw(out, 0x6700); /* never a counter query */
+    uint8_t *remaining = sec + (pin ? 8 : 9);
+    if (!*remaining) return sw(out, 0x6983);
+    uint8_t expected[16]; memset(expected, 0xFF, sizeof(expected));
+    uint8_t expected_length;
+    if (pin) {
+        fs->pin_authenticated = false;
+        if (sec[40] == 0) { expected_length = length; memcpy(expected, sec + 12, length); }
+        else {
+            expected_length = 8;
+            uint8_t nibble = sec[40] == 2 ? 2 : 0;
+            if (sec[40] == 2) expected[0] = (uint8_t)(0x20 | length);
+            for (uint8_t i = 0; i < length; i++, nibble++) {
+                uint8_t digit = (uint8_t)(sec[12+i] - '0');
+                if (!(nibble & 1)) expected[nibble/2] = (uint8_t)((digit << 4) | 0x0F);
+                else expected[nibble/2] = (uint8_t)((expected[nibble/2] & 0xF0) | digit);
+            }
+        }
+    } else {
+        fs->key_authenticated = false;
+        if (!fs->challenge_valid) return sw(out, 0x6985);
+        fs->challenge_valid = false;
+        uint8_t key[16], iv[8] = {0};
+        memcpy(key, sec + 24, length);
+        if (length == 8) memcpy(key + 8, key, 8);
+        ulc_tdes_enc_cbc(expected, fs->challenge, 8, key, iv);
+        memset(key, 0, sizeof(key)); memset(fs->challenge, 0, sizeof(fs->challenge));
+        expected_length = 8;
+    }
+    if (a->lc != expected_length) { memset(expected, 0, sizeof(expected)); return sw(out, 0x6700); }
+    uint8_t difference = 0;
+    for (uint8_t i = 0; i < expected_length; i++) difference |= (uint8_t)(expected[i] ^ a->data[i]);
+    memset(expected, 0, sizeof(expected));
+    if (difference) {
+        --*remaining; fs->dirty = true;
+        return sw(out, (uint16_t)(0x63C0 | *remaining));
+    }
+    if (*remaining != sec[pin ? 6 : 7]) fs->dirty = true;
+    *remaining = sec[pin ? 6 : 7];
+    if (pin) fs->pin_authenticated = true; else fs->key_authenticated = true;
+    return sw(out, 0x9000);
+}
+
 uint16_t iso7816_fs_exchange(iso7816_fs_t *fs, const uint8_t *command,
         uint16_t length, uint8_t *out, uint16_t cap) {
     if (!out || cap < 2) return 0;
@@ -189,6 +283,11 @@ uint16_t iso7816_fs_exchange(iso7816_fs_t *fs, const uint8_t *command,
     apdu_t a;
     if (!parse(command, length, &a)) return sw(out, 0x6700);
     if (a.cla != 0) return sw(out, 0x6E00);
+    if (a.ins != 0x82 && a.ins != 0x84) fs->challenge_valid = false;
+    if (a.ins == 0x20 || a.ins == 0x82 || a.ins == 0x84) {
+        fs->pending_length = fs->pending_offset = 0;
+        return authentication(fs, &a, out, cap);
+    }
     if (a.ins == 0xC0) {
         if (a.p1 || a.p2 || a.lc || !a.has_le) return sw(out, 0x6A86);
         if (fs->pending_offset >= fs->pending_length) return sw(out, 0x6985);
@@ -223,6 +322,10 @@ uint16_t iso7816_fs_exchange(iso7816_fs_t *fs, const uint8_t *command,
     const iso7816_fs_node_t *n = &fs->nodes[index];
     if (n->type != (binary ? ISO7816_FS_BINARY : ISO7816_FS_RECORDS)) return sw(out, 0x6981);
     if (!(n->access & (write ? ISO7816_FS_WRITE : ISO7816_FS_READ))) return sw(out, 0x6982);
+    if ((n->access & (write ? ISO7816_FS_WRITE_PIN : ISO7816_FS_READ_PIN)) && !fs->pin_authenticated)
+        return sw(out, 0x6982);
+    if ((n->access & (write ? ISO7816_FS_WRITE_KEY : ISO7816_FS_READ_KEY)) && !fs->key_authenticated)
+        return sw(out, 0x6982);
     uint16_t count = write ? a.lc : a.le;
     uint16_t status = 0x9000;
     if (records) {

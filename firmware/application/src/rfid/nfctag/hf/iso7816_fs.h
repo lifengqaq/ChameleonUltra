@@ -13,6 +13,11 @@
 #define ISO7816_FS_RECORDS 2u
 #define ISO7816_FS_READ 1u
 #define ISO7816_FS_WRITE 2u
+#define ISO7816_FS_READ_PIN 4u
+#define ISO7816_FS_WRITE_PIN 8u
+#define ISO7816_FS_READ_KEY 16u
+#define ISO7816_FS_WRITE_KEY 32u
+#define ISO7816_FS_SECURITY_SIZE 44u
 
 /* CFS1 / version / count / total-length-BE16, then parent,type,FID-BE16,
  * SFI,access,AID-length,FCI-length-BE16,data-length-BE16,record-length-BE16,
@@ -29,6 +34,10 @@ typedef struct {
     uint16_t length;
     uint8_t count, selected_df, selected_ef, current_record;
     bool dirty;
+    bool pin_authenticated, key_authenticated, challenge_valid;
+    uint16_t security_offset;
+    uint8_t challenge[8];
+    bool (*random)(uint8_t *out, uint8_t length);
     iso7816_fs_node_t nodes[ISO7816_FS_MAX_NODES];
     uint8_t pending[ISO7816_FS_MAX_FCI];
     uint16_t pending_length, pending_offset;
