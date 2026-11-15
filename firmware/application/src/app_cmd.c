@@ -2729,7 +2729,8 @@ static bool cpu_transceive(void *context, const uint8_t *tx, uint16_t tx_size,
     m_cpu_io_status = pcd_14a_reader_bytes_transfer(PCD_TRANSCEIVE,
         (uint8_t *)tx, (uint8_t)tx_size, rx, &bits, *rx_size * 8);
     pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
-    if (m_cpu_io_status != STATUS_HF_TAG_OK || (bits & 7)) return false;
+    if (m_cpu_io_status != STATUS_HF_TAG_OK) return false;
+    if (bits & 7) { m_cpu_io_status = STATUS_HF_ERR_STAT; return false; }
     *rx_size = bits / 8;
     return true;
 }

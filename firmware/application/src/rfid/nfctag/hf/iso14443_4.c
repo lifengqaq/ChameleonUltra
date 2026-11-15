@@ -83,10 +83,18 @@ iso_dep_picc_result_t iso_dep_picc_receive(iso_dep_picc_t *s, const uint8_t *fra
         uint16_t size, iso_dep_send_fn send, void *context) {
     if (!size || s->frame_size < 16) return ISO_DEP_IGNORED;
     uint8_t pcb = frame[0];
+    /* Only 106 kbit/s is supported. PPS at the current rate still needs PPSS. */
+    if ((pcb & 0xF0) == 0xD0) {
+        if ((pcb & 15) == s->m_cid &&
+                ((size == 2 && frame[1] == 0x01) ||
+                 (size == 3 && frame[1] == 0x11 && frame[2] == 0)))
+            send(context, frame, 1);
+        return ISO_DEP_IGNORED;
+    }
     bool cid = (pcb & 8) != 0;
     uint16_t off = cid ? 2 : 1;
     if (size < off || (cid && ((frame[1] & 0xF0) || frame[1] != s->m_cid)) ||
-            (!cid && s->m_cid_supported)) return ISO_DEP_IGNORED;
+            (!cid && (s->m_cid_supported || s->m_cid != 0))) return ISO_DEP_IGNORED;
     if (cid) s->m_cid_supported = true;
     if ((pcb & 0xF7) == 0xC2 && size == off) {
         send(context, frame, size);
