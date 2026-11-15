@@ -2780,7 +2780,7 @@ static data_frame_tx_t *cmd_processor_hf14a_4_session(uint16_t cmd, uint16_t sta
 static data_frame_tx_t *cmd_processor_hf14a_4_filesystem(uint16_t cmd, uint16_t status,
         uint16_t length, uint8_t *data) {
     if (length == 1 && data[0] == 7) {
-        const uint8_t capabilities[] = {2, 3};
+        uint8_t capabilities[] = {2, 3};
         return data_frame_make(cmd, STATUS_SUCCESS, sizeof(capabilities), capabilities);
     }
     uint8_t out[200]; uint16_t size = 0;
