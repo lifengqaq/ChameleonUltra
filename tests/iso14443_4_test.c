@@ -24,6 +24,10 @@ static void test_picc(void) {
     iso_dep_picc_t s;
     iso_dep_picc_reset(&s); assert(!iso_dep_picc_rats(&s,0x90));
     assert(iso_dep_picc_rats(&s,0x00));
+    uint8_t ats_in[20] = {20,0x75,0x77,0x70,3}, ats_out[20];
+    uint16_t ats_size = sizeof(ats_out);
+    assert(iso_dep_picc_ats(ats_in,sizeof(ats_in),16,ats_out,&ats_size));
+    assert(ats_size==14 && ats_out[0]==14 && ats_out[2]==0 && ats_out[4]==2);
     uint8_t pps[]={0xD0,0x11,0};
     iso_dep_picc_receive(&s,pps,3,capture,NULL);
     assert(sent_size==1 && sent[0]==0xD0);

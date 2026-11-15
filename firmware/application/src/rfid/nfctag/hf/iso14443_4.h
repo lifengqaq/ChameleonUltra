@@ -41,6 +41,8 @@ typedef enum {
 
 void iso_dep_picc_reset(iso_dep_picc_t *s);
 bool iso_dep_picc_rats(iso_dep_picc_t *s, uint8_t parameter);
+bool iso_dep_picc_ats(const uint8_t *ats, uint16_t size, uint16_t fsd,
+                      uint8_t *out, uint16_t *out_size);
 /* PICC input/output excludes CRC_A; RF driver checks/appends it. */
 iso_dep_picc_result_t iso_dep_picc_receive(iso_dep_picc_t *s, const uint8_t *frame,
                                         uint16_t size, iso_dep_send_fn send, void *context);

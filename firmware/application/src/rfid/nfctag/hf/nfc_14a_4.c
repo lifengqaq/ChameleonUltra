@@ -11,6 +11,7 @@
  */
 
 #include <string.h>
+#include "app_util_platform.h"
 #include "nfc_14a_4.h"
 #include "nfc_14a.h"
 #include "tag_emulation.h"
@@ -65,7 +66,7 @@ static void persist_static_table(void) {
     }
 }
 
-bool nfc_tag_14a_4_add_static_response(const uint8_t *cmd, uint8_t cmd_len,
+static bool add_static_response_unlocked(const uint8_t *cmd, uint8_t cmd_len,
                                     const uint8_t *resp, uint16_t resp_len) {
     if (!cmd_len || cmd_len > NFC_14A_4_MAX_STATIC_CMD_LEN || resp_len < 2 ||
             resp_len > NFC_14A_4_MAX_LARGE_RESP_LEN) return false;
@@ -99,6 +100,15 @@ bool nfc_tag_14a_4_add_static_response(const uint8_t *cmd, uint8_t cmd_len,
     return true;
 }
 
+bool nfc_tag_14a_4_add_static_response(const uint8_t *cmd, uint8_t cmd_len,
+        const uint8_t *resp, uint16_t resp_len) {
+    bool result;
+    CRITICAL_REGION_ENTER();
+    result = add_static_response_unlocked(cmd, cmd_len, resp, resp_len);
+    CRITICAL_REGION_EXIT();
+    return result;
+}
+
 uint8_t nfc_tag_14a_4_static_response_count(void) {
     return m_static_resp_count + m_large_resp_count;
 }
@@ -120,11 +130,13 @@ bool nfc_tag_14a_4_get_static_response(uint8_t index, const uint8_t **cmd,
 }
 
 void nfc_tag_14a_4_clear_static_responses(void) {
+    CRITICAL_REGION_ENTER();
     m_static_resp_count = 0;
     m_large_resp_count  = 0;
     if (m_tag_information) {
         m_tag_information->static_resp_count = 0;
     }
+    CRITICAL_REGION_EXIT();
 }
 
 static bool find_static_response(const uint8_t *apdu, uint16_t apdu_len,
@@ -203,20 +215,30 @@ static void nfc_tag_14a_4_state_handler(uint8_t *data, uint16_t szBits) {
 /* ------------------------------------------------------------------ */
 
 bool nfc_tag_14a_4_get_pending_apdu(uint8_t *buf, uint16_t *length) {
-    if (!m_tcl_session_state.m_apdu_pending) return false;
-    m_tcl_session_state.m_apdu_pending = false;
-    *length = m_tcl_session_state.m_apdu_len;
-    memcpy(buf, m_tcl_session_state.m_apdu_buf, m_tcl_session_state.m_apdu_len);
-    return true;
+    bool pending;
+    CRITICAL_REGION_ENTER();
+    pending = m_tcl_session_state.m_apdu_pending;
+    if (pending) {
+        *length = m_tcl_session_state.m_apdu_len;
+        memcpy(buf, m_tcl_session_state.m_apdu_buf, *length);
+        m_tcl_session_state.m_apdu_pending = false;
+    }
+    CRITICAL_REGION_EXIT();
+    return pending;
 }
 
 bool nfc_tag_14a_4_set_response(const uint8_t *data, uint16_t length) {
-    if (length < 2 || length > NFC_14A_4_MAX_APDU ||
-            !m_tcl_session_state.awaiting_response || m_tcl_session_state.m_response_ready) return false;
-    memcpy(m_tcl_session_state.m_resp_buf, data, length);
-    m_tcl_session_state.m_resp_len = length;
-    m_tcl_session_state.m_response_ready = true;
-    return true;
+    bool accepted;
+    CRITICAL_REGION_ENTER();
+    accepted = length >= 2 && length <= NFC_14A_4_MAX_APDU &&
+        m_tcl_session_state.awaiting_response && !m_tcl_session_state.m_response_ready;
+    if (accepted) {
+        memcpy(m_tcl_session_state.m_resp_buf, data, length);
+        m_tcl_session_state.m_resp_len = length;
+        m_tcl_session_state.m_response_ready = true;
+    }
+    CRITICAL_REGION_EXIT();
+    return accepted;
 }
 
 /* ------------------------------------------------------------------ */

@@ -1,3 +1,4 @@
+#include "iso14443_4.h"
 #include <hal/nrf_nfct.h>
 #include <nrfx_nfct.h>
 #include <nrf_gpio.h>
@@ -581,7 +582,15 @@ void nfc_tag_14a_data_process(uint8_t *p_data) {
                         // If the FSD is larger than the set of ATS, then returns normal ATS data, otherwise the data of the FSD limited length will be returned
                         uint8_t len = fsd >= auto_coll_res->ats->length ? auto_coll_res->ats->length : fsd;
                         // Back to ATS data according to FSD, FSD is the largest frame size supported by PCD. After removing CRC, it is the actual data frame size support
-                        nfc_tag_14a_tx_bytes(auto_coll_res->ats->data, len, true);
+                        if (m_tag_handler.cb_rats) {
+                            uint8_t ats[255];
+                            uint16_t ats_len = sizeof(ats);
+                            if (iso_dep_picc_ats(auto_coll_res->ats->data, auto_coll_res->ats->length,
+                                    ats_fsdi_table[p_data[1] >> 4], ats, &ats_len))
+                                nfc_tag_14a_tx_bytes(ats, ats_len, true);
+                        } else {
+                            nfc_tag_14a_tx_bytes(auto_coll_res->ats->data, len, true);
+                        }
                     } else {
                         nfc_tag_14a_tx_nbit(NAK_INVALID_OPERATION_TBIV, 4);
                     }

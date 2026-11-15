@@ -28,6 +28,23 @@ bool iso_dep_picc_rats(iso_dep_picc_t *s, uint8_t parameter) {
     return true;
 }
 
+bool iso_dep_picc_ats(const uint8_t *ats, uint16_t size, uint16_t fsd,
+        uint8_t *out, uint16_t *out_size) {
+    iso_dep_reader_t validation;
+    if (fsd < 16 || fsd > 256 || !iso_dep_reader_init(&validation, ats, size)) return false;
+    uint16_t n = size;
+    if (n > fsd - 2) n = fsd - 2;
+    if (n > *out_size) return false;
+    memcpy(out, ats, n);
+    out[0] = n; /* Trimming historical bytes must also update TL. */
+    uint16_t off = 2;
+    if (out[1] & 0x10) out[off++] &= 0x80; /* 106 kbit/s only */
+    if (out[1] & 0x20) off++;
+    if (out[1] & 0x40) out[off] &= 0x02;   /* CID supported, NAD unsupported */
+    *out_size = n;
+    return true;
+}
+
 static uint8_t picc_header(iso_dep_picc_t *s, uint8_t *buf, uint8_t pcb) {
     buf[0] = pcb | (s->m_cid_supported ? 8 : 0);
     if (s->m_cid_supported) buf[1] = s->m_cid;
