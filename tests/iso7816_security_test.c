@@ -15,11 +15,20 @@ static void fixture(void) {
     image[4] = 2; image[5] = 2; image[7] = 82;
     image[8] = 255; image[10] = 0x3F;
     image[21] = 0; image[22] = 1; image[23] = 0x10; image[24] = 1;
-    image[26] = ISO7816_FS_READ | ISO7816_FS_WRITE | ISO7816_FS_READ_PIN | ISO7816_FS_WRITE_KEY;
+    image[26] = ISO7816_FS_READ | ISO7816_FS_WRITE | ISO7816_FS_READ_PIN | ISO7816_FS_WRITE_PIN;
     image[31] = 4; memcpy(image + 34, "ABCD", 4);
     uint8_t *sec = image + 38; memcpy(sec, "SEC1", 4);
-    sec[6] = sec[7] = sec[8] = sec[9] = 3;
-    sec[10] = 6; sec[11] = 8; memset(sec + 12, 0xFF, 28); memcpy(sec + 12, "000000", 6);
+    sec[6] = sec[8] = 3;
+    sec[10] = 6; memset(sec + 12, 0xFF, 28); memcpy(sec + 12, "000000", 6);
+    assert(iso7816_fs_open(&fs, image, 82));
+}
+static void fixture_key(void) {
+    fixture();
+    image[26] = ISO7816_FS_READ | ISO7816_FS_WRITE | ISO7816_FS_READ_KEY | ISO7816_FS_WRITE_KEY;
+    uint8_t *sec = image + 38;
+    sec[6] = sec[8] = 0; sec[7] = sec[9] = 3;
+    sec[10] = 0; sec[11] = 8;
+    memset(sec + 12, 0xFF, 28);
     const uint8_t key[8] = {0x13,0x34,0x57,0x79,0x9B,0xBC,0xDF,0xF1};
     memcpy(sec + 24, key, 8);
     assert(iso7816_fs_open(&fs, image, 82));
@@ -54,6 +63,13 @@ int main(void) {
     assert(iso7816_fs_open(&fs, image, 82) && good_pin() == 0x6983);
 
     fixture(); select_file();
+    uint8_t *sec = image + 38;
+    sec[7] = sec[9] = 3; sec[11] = 8;
+    const uint8_t test_key[8] = {0x13,0x34,0x57,0x79,0x9B,0xBC,0xDF,0xF1};
+    memcpy(sec + 24, test_key, 8);
+    assert(!iso7816_fs_validate(image, 82)); /* both credentials are no longer a valid profile */
+
+    fixture_key(); select_file();
     assert(APDU(0,0xD6,0,0,1,0xAA) == 0x6982);
     assert(APDU(0,0x84,0,0,8) == 0x6985); /* no deterministic RNG fallback */
     fs.random = random_ok;

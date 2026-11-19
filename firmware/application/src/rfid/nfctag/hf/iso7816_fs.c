@@ -66,6 +66,7 @@ bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
         const uint8_t *sec = image + offset;
         if (sec[10] > 12 || (sec[10] && sec[10] < 4) ||
                 (sec[11] != 0 && sec[11] != 8 && sec[11] != 16) ||
+                (sec[10] && sec[11]) || /* exactly one auth type per file system */
                 sec[6] > 15 || sec[7] > 15 || sec[8] > sec[6] || sec[9] > sec[7] ||
                 (sec[10] ? !sec[6] : (sec[6] || sec[8])) ||
                 (sec[11] ? !sec[7] : (sec[7] || sec[9])) ||
