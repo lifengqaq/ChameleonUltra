@@ -197,6 +197,7 @@
 #define DATA_CMD_HF14A_4_SESSION                (6007)  /* explicit ISO-DEP session open/close */
 #define DATA_CMD_HF14A_4_STATIC_READ            (6008)  /* enumerate stored response table */
 #define DATA_CMD_HF14A_4_FILESYSTEM             (6009)  /* versioned file image upload/readback */
+#define DATA_CMD_HF14A_4_MANAGED_SESSION        (6011)  /* token-bound ISO-DEP reader operations */
 #define DATA_CMD_HF14A_4_EMV_SCAN               (6005)  /* full EMV scan in one call            */
 
 #define DATA_CMD_EM410X_SET_EMU_ID              (5000)

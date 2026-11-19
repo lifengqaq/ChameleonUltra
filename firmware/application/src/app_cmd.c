@@ -34,6 +34,9 @@ extern void nfc_tag_14a_set_sniff_passive(bool passive);
 
 #if defined(PROJECT_CHAMELEON_ULTRA)
 static bool m_cpu_active = false;
+static bool m_cpu_managed = false;
+static uint32_t m_cpu_session_id;
+static void cpu_close(void);
 #endif
 
 #define NRF_LOG_MODULE_NAME app_cmd
@@ -685,8 +688,6 @@ static data_frame_tx_t *cmd_processor_mf0_ulc_set_key(uint16_t cmd, uint16_t sta
 #if defined(PROJECT_CHAMELEON_ULTRA)
 
 static data_frame_tx_t *cmd_processor_hf14a_set_field_on(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    if (cmd != DATA_CMD_HF14A_4_READER_APDU && cmd != DATA_CMD_HF14A_4_SESSION)
-        m_cpu_active = false;
     device_mode_t mode = get_device_mode();
     if (mode != DEVICE_MODE_READER) {
         return data_frame_make(cmd, STATUS_DEVICE_MODE_ERROR, 0, NULL);
@@ -2086,6 +2087,11 @@ static data_frame_tx_t *before_reader_run(uint16_t cmd, uint16_t status, uint16_
     if (mode != DEVICE_MODE_READER) {
         return data_frame_make(cmd, STATUS_DEVICE_MODE_ERROR, 0, NULL);
     }
+    // Other reader commands may reset the RF field or change the selected card.
+    if (m_cpu_active && cmd != DATA_CMD_HF14A_4_MANAGED_SESSION &&
+            (m_cpu_managed || (cmd != DATA_CMD_HF14A_4_READER_APDU && cmd != DATA_CMD_HF14A_4_SESSION))) {
+        cpu_close();
+    }
     return NULL;
 }
 
@@ -2709,6 +2715,7 @@ static uint8_t m_cpu_io_status;
 
 static void cpu_close(void) {
     m_cpu_active = false;
+    m_cpu_managed = false;
     pcd_14a_reader_antenna_off();
     pcd_14a_reader_timeout_set(DEF_COM_TIMEOUT);
 }
@@ -2755,25 +2762,35 @@ static uint8_t cpu_exchange(const uint8_t *apdu, uint16_t size, uint8_t *respons
     return result == ISO_DEP_IO_ERROR ? m_cpu_io_status : STATUS_HF_ERR_STAT;
 }
 
-/* 6007: 00=field off, 01=new select/RATS; response uses the usual scan format. */
-static data_frame_tx_t *cmd_processor_hf14a_4_session(uint16_t cmd, uint16_t status,
-        uint16_t length, uint8_t *data) {
-    if (length != 1 || data[0] > 1) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
-    if (data[0] == 0) {
-        cpu_close();
-        return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
-    }
+static data_frame_tx_t *cpu_session_open(uint16_t cmd, bool managed) {
     picc_14a_tag_t tag;
-    status = cpu_open(&tag);
+    uint8_t status = cpu_open(&tag);
     if (status != STATUS_HF_TAG_OK) return data_frame_make(cmd, status, 0, NULL);
-    uint8_t out[272];
+    uint8_t out[276];
     uint16_t n = 0;
+    if (managed) {
+        m_cpu_managed = true;
+        uint32_t id = ++m_cpu_session_id;
+        out[n++] = (uint8_t)(id >> 24);
+        out[n++] = (uint8_t)(id >> 16);
+        out[n++] = (uint8_t)(id >> 8);
+        out[n++] = (uint8_t)id;
+    }
     out[n++] = tag.uid_len;
     memcpy(out + n, tag.uid, tag.uid_len); n += tag.uid_len;
     memcpy(out + n, tag.atqa, 2); n += 2;
     out[n++] = tag.sak; out[n++] = tag.ats_len;
     memcpy(out + n, tag.ats, tag.ats_len); n += tag.ats_len;
     return data_frame_make(cmd, STATUS_HF_TAG_OK, n, out);
+}
+
+/* 6007: 00=field off, 01=new select/RATS; response uses the usual scan format. */
+static data_frame_tx_t *cmd_processor_hf14a_4_session(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    if (length != 1 || data[0] > 1) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    if (data[0] == 1) return cpu_session_open(cmd, false);
+    cpu_close();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
 /* 6009: atomic CFS1 file-image management; chunks are at most 200 bytes. */
@@ -2810,6 +2827,13 @@ static data_frame_tx_t *cmd_processor_hf14a_4_static_read(uint16_t cmd, uint16_t
     return data_frame_make(cmd, STATUS_SUCCESS, 3 + command_len + response_len, out);
 }
 
+static data_frame_tx_t *cpu_session_exchange(uint16_t cmd, uint16_t length, uint8_t *data) {
+    static uint8_t response[512];
+    uint16_t size = sizeof(response);
+    uint8_t status = cpu_exchange(data, length, response, &size);
+    return data_frame_make(cmd, status, status == STATUS_HF_TAG_OK ? size : 0, response);
+}
+
 static data_frame_tx_t *cmd_processor_hf14a_4_reader_apdu(uint16_t cmd, uint16_t status,
         uint16_t length, uint8_t *data) {
     if (length < 4 || length > ISO_DEP_MAX_APDU) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
@@ -2818,10 +2842,24 @@ static data_frame_tx_t *cmd_processor_hf14a_4_reader_apdu(uint16_t cmd, uint16_t
         status = cpu_open(&tag);
         if (status != STATUS_HF_TAG_OK) return data_frame_make(cmd, status, 0, NULL);
     }
-    static uint8_t response[512];
-    uint16_t size = sizeof(response);
-    status = cpu_exchange(data, length, response, &size);
-    return data_frame_make(cmd, status, status == STATUS_HF_TAG_OK ? size : 0, response);
+    return cpu_session_exchange(cmd, length, data);
+}
+
+/* 6011: open=01; close=00|id; exchange=02|id|APDU. Never implicitly selects a card. */
+static data_frame_tx_t *cmd_processor_hf14a_4_managed_session(uint16_t cmd, uint16_t status,
+        uint16_t length, uint8_t *data) {
+    if (length == 1 && data[0] == 1) return cpu_session_open(cmd, true);
+    bool close = length == 5 && data[0] == 0;
+    bool exchange = length >= 9 && length <= 5 + ISO_DEP_MAX_APDU && data[0] == 2;
+    if (!close && !exchange) return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    uint32_t id = ((uint32_t)data[1] << 24) | ((uint32_t)data[2] << 16) |
+                  ((uint32_t)data[3] << 8) | data[4];
+    if (!m_cpu_active || !m_cpu_managed || id != m_cpu_session_id) {
+        return data_frame_make(cmd, STATUS_HF_SESSION_LOST, 0, NULL);
+    }
+    if (exchange) return cpu_session_exchange(cmd, length - 5, data + 5);
+    cpu_close();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
 /* Bounded BER-TLV traversal (including constructed FCI/GPO templates). */
@@ -3125,6 +3163,7 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_HF14A_4_STATIC_RESP,            before_hf14a_4_emulator,                        cmd_processor_hf14a_4_static_resp,           NULL                   },
     {    DATA_CMD_HF14A_4_READER_APDU,            before_reader_run,        cmd_processor_hf14a_4_reader_apdu,           NULL                   },
     {    DATA_CMD_HF14A_4_SESSION,                before_reader_run,           cmd_processor_hf14a_4_session,               NULL                   },
+    {    DATA_CMD_HF14A_4_MANAGED_SESSION,        before_reader_run,           cmd_processor_hf14a_4_managed_session,       NULL                   },
     {    DATA_CMD_HF14A_4_FILESYSTEM,             before_hf14a_4_emulator,   cmd_processor_hf14a_4_filesystem,            NULL                   },
     {    DATA_CMD_HF14A_4_STATIC_READ,            before_hf14a_4_emulator,                        cmd_processor_hf14a_4_static_read,           NULL                   },
     {    DATA_CMD_HF14A_4_EMV_SCAN,               before_hf_reader_run,        cmd_processor_hf14a_4_emv_scan,              NULL                   },

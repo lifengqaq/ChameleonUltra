@@ -35,6 +35,7 @@
 #define     STATUS_MEM_ERR                          (0x73)  // Can't allocate memory or work with memory error
 #define     STATUS_CREATE_RESPONSE_ERR              (0x74)  // Can't create response for command
 #define     STATUS_CMD_ERR                          (0x75)  // Execution of command failed
+#define     STATUS_HF_SESSION_LOST                  (0x76)  // No matching managed ISO-DEP session
 
 
 #endif
