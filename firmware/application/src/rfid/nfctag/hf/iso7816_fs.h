@@ -18,6 +18,10 @@
 #define ISO7816_FS_READ_KEY 16u
 #define ISO7816_FS_WRITE_KEY 32u
 #define ISO7816_FS_SECURITY_SIZE 44u
+#define ISO7816_FS_VERSION_SM4 3u
+#define ISO7816_FS_AUTH_CAPS 7u /* bit 0: PIN, bit 1: DES/2-key 3DES, bit 2: SM4 */
+#define ISO7816_FS_SM4_PADDED8 1u
+#define ISO7816_FS_SM4_RAW16 2u
 
 /* CFS1 / version / count / total-length-BE16, then parent,type,FID-BE16,
  * SFI,access,AID-length,FCI-length-BE16,data-length-BE16,record-length-BE16,
@@ -36,7 +40,7 @@ typedef struct {
     bool dirty;
     bool pin_authenticated, key_authenticated, challenge_valid;
     uint16_t security_offset;
-    uint8_t challenge[8];
+    uint8_t challenge[16];
     bool (*random)(uint8_t *out, uint8_t length);
     iso7816_fs_node_t nodes[ISO7816_FS_MAX_NODES];
     uint8_t pending[ISO7816_FS_MAX_FCI];

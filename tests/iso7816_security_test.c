@@ -10,6 +10,20 @@ static bool random_ok(uint8_t *out, uint8_t length) {
     assert(length == 8); memcpy(out, challenge, 8); return true;
 }
 static bool random_fail(uint8_t *out, uint8_t length) { (void)out; (void)length; return false; }
+static const uint8_t sm4_vector[16] = {
+    0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10
+};
+static const uint8_t sm4_raw_answer[16] = {
+    0x68,0x1E,0xDF,0x34,0xD2,0x06,0x96,0x5E,0x86,0xB3,0xE9,0x4F,0x53,0x6E,0x42,0x46
+};
+static const uint8_t sm4_padded_answer[16] = {
+    0xD8,0x80,0xB1,0x37,0xD5,0xD0,0x27,0xCB,0x47,0x1F,0x72,0x58,0x16,0xB6,0x2E,0x07
+};
+static bool random_sm4(uint8_t *out, uint8_t length) {
+    assert(length == 8 || length == 16);
+    memcpy(out, sm4_vector, length);
+    return true;
+}
 static void fixture(void) {
     memset(image, 0, sizeof(image)); memcpy(image, "CFS1", 4);
     image[4] = 2; image[5] = 2; image[7] = 82;
@@ -43,6 +57,43 @@ static uint16_t apdu(const uint8_t *command, uint16_t length) {
 static void select_file(void) { assert(APDU(0,0xA4,0,0x0C,2,0x10,1) == 0x9000); }
 static uint16_t bad_pin(void) { return APDU(0,0x20,0,0,6,'1','1','1','1','1','1'); }
 static uint16_t good_pin(void) { return APDU(0,0x20,0,0,6,'0','0','0','0','0','0'); }
+
+static void verify_sm4(uint8_t format, uint8_t le, const uint8_t ciphertext[16]) {
+    fixture_key();
+    uint8_t *sec = image + 38;
+    image[4] = ISO7816_FS_VERSION_SM4;
+    sec[5] = 0x80; sec[41] = 0x09; sec[42] = format;
+    assert(!iso7816_fs_validate(image, 82)); /* 8-byte DES key is not SM4 */
+    sec[11] = 16;
+    memcpy(sec + 24, sm4_vector, 16);
+    sec[42] = 0;
+    assert(!iso7816_fs_validate(image, 82)); /* explicit challenge format required */
+    sec[42] = format; image[4] = 2;
+    assert(!iso7816_fs_validate(image, 82)); /* never interpret SM4 as 3DES */
+    image[4] = ISO7816_FS_VERSION_SM4;
+    assert(iso7816_fs_open(&fs, image, 82));
+    fs.random = random_sm4;
+    select_file();
+    assert(APDU(0,0xB0,0,0,4) == 0x6982);
+    assert(APDU(0,0x84,0,0,le == 8 ? 16 : 8) == 0x6A86 && sec[9] == 3);
+    assert(APDU(0,0x84,0,0,le) == 0x9000 && !memcmp(response + 1, sm4_vector, le));
+    assert(APDU(0,0x82,0x09,0x80,8,0,0,0,0,0,0,0,0) == 0x6700 && sec[9] == 3);
+    uint8_t proof[21] = {0,0x82,0x09,0x80,0x10};
+    memcpy(proof + 5, ciphertext, 16);
+    assert(apdu(proof, sizeof(proof)) == 0x6985); /* short APDU consumed the challenge */
+    assert(APDU(0,0x84,0,0,le) == 0x9000);
+    proof[20] ^= 1;
+    assert(apdu(proof, sizeof(proof)) == 0x63C2 && sec[9] == 2);
+    proof[20] ^= 1;
+    assert(APDU(0,0x84,0,0,le) == 0x9000);
+    assert(apdu(proof, sizeof(proof)) == 0x9000 && sec[9] == 3);
+    assert(APDU(0,0xB0,0,0,4) == 0x9000);
+    assert(apdu(proof, sizeof(proof)) == 0x6985);
+    iso7816_fs_reset(&fs);
+    select_file();
+    assert(APDU(0,0xB0,0,0,4) == 0x6982 && sec[9] == 3);
+}
+
 int main(void) {
     fixture();
     for (uint16_t n = 0; n < 82; n++) assert(!iso7816_fs_validate(image, n));
@@ -94,6 +145,8 @@ int main(void) {
     assert(APDU(0,0x20,0,0,8,0,0,0,0xFF,0xFF,0xFF,0xFF,0xFF) == 0x9000);
     fixture(); image[26] = ISO7816_FS_READ_PIN;
     assert(!iso7816_fs_validate(image, 82)); /* missing base read grant */
-    puts("ISO7816 security: PIN encodings, DES challenge, remaining attempts, blocked state, reset and replay passed");
+    verify_sm4(ISO7816_FS_SM4_PADDED8, 8, sm4_padded_answer);
+    verify_sm4(ISO7816_FS_SM4_RAW16, 16, sm4_raw_answer);
+    puts("ISO7816 security: PIN, DES and SM4 challenges, attempts, block, reset and replay passed");
     return 0;
 }

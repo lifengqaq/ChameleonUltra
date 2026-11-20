@@ -31,6 +31,7 @@ extern void nfc_tag_14a_set_tx_sniff_cb(void (*cb)(const uint8_t *, uint16_t));
 extern void nfc_tag_14a_clear_tx_sniff_cb(void);
 extern void nfc_tag_14a_set_sniff_passive(bool passive);
 #include "nfc_14a_4.h"
+#include "iso7816_fs.h"
 
 #if defined(PROJECT_CHAMELEON_ULTRA)
 static bool m_cpu_active = false;
@@ -2797,7 +2798,7 @@ static data_frame_tx_t *cmd_processor_hf14a_4_session(uint16_t cmd, uint16_t sta
 static data_frame_tx_t *cmd_processor_hf14a_4_filesystem(uint16_t cmd, uint16_t status,
         uint16_t length, uint8_t *data) {
     if (length == 1 && data[0] == 7) {
-        uint8_t capabilities[] = {2, 3};
+        uint8_t capabilities[] = {ISO7816_FS_VERSION_SM4, ISO7816_FS_AUTH_CAPS};
         return data_frame_make(cmd, STATUS_SUCCESS, sizeof(capabilities), capabilities);
     }
     uint8_t out[200]; uint16_t size = 0;

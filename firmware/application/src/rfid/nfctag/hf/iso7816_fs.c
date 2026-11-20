@@ -1,4 +1,5 @@
 #include "iso7816_fs.h"
+#include "sm4.h"
 #include "ulc_3des.h"
 #include <stddef.h>
 #include <string.h>
@@ -20,8 +21,10 @@ void iso7816_fs_reset(iso7816_fs_t *fs) {
 bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
     memset(fs, 0, sizeof(*fs));
     if (!image || length < 8 || length > ISO7816_FS_MAX_IMAGE ||
-            memcmp(image, "CFS1", 4) || (image[4] != 1 && image[4] != 2) || !image[5] ||
+            memcmp(image, "CFS1", 4) || image[4] < 1 || image[4] > ISO7816_FS_VERSION_SM4 || !image[5] ||
             image[5] > ISO7816_FS_MAX_NODES || be16(image + 6) != length) return false;
+    const bool protected = image[4] >= 2;
+    const bool sm4 = image[4] == ISO7816_FS_VERSION_SM4;
     uint32_t offset = 8;
     for (uint8_t i = 0; i < image[5]; i++) {
         if (offset + 13 > length) return false;
@@ -33,7 +36,7 @@ bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
         n->record_length = be16(p + 11);
         offset += 13;
         if (n->type > ISO7816_FS_RECORDS || !n->fid || n->fid == 0x3FFF ||
-                n->sfi > 30 || n->access > (image[4] == 2 ? 63 : 3) || n->aid_length > 16 ||
+                n->sfi > 30 || n->access > (protected ? 63 : 3) || n->aid_length > 16 ||
                 (n->aid_length && n->aid_length < 5) || n->fci_length > ISO7816_FS_MAX_FCI ||
                 offset + n->aid_length + n->fci_length + n->data_length > length) return false;
         if (i == 0) {
@@ -61,7 +64,7 @@ bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
                     !memcmp(image + n->aid_offset, image + other->aid_offset, n->aid_length)) return false;
         }
     }
-    if (image[4] == 2) {
+    if (protected) {
         if (offset + ISO7816_FS_SECURITY_SIZE != length || memcmp(image + offset, "SEC1", 4)) return false;
         const uint8_t *sec = image + offset;
         if (sec[10] > 12 || (sec[10] && sec[10] < 4) ||
@@ -70,7 +73,10 @@ bool iso7816_fs_open(iso7816_fs_t *fs, uint8_t *image, uint16_t length) {
                 sec[6] > 15 || sec[7] > 15 || sec[8] > sec[6] || sec[9] > sec[7] ||
                 (sec[10] ? !sec[6] : (sec[6] || sec[8])) ||
                 (sec[11] ? !sec[7] : (sec[7] || sec[9])) ||
-                (!sec[10] && !sec[11]) || sec[40] > 2 || sec[42] || sec[43]) return false;
+                (!sec[10] && !sec[11]) || sec[40] > 2 || sec[43] ||
+                (sm4 ? (sec[11] != SM4_BLOCK_SIZE ||
+                    (sec[42] != ISO7816_FS_SM4_PADDED8 && sec[42] != ISO7816_FS_SM4_RAW16))
+                    : sec[42] != 0)) return false;
         for (uint8_t j = 0; j < sec[10]; j++) if (sec[12+j] < '0' || sec[12+j] > '9') return false;
         for (uint8_t j = 0; j < image[5]; j++) {
             const uint8_t a = fs->nodes[j].access;
@@ -214,21 +220,24 @@ static uint16_t select_file(iso7816_fs_t *fs, const apdu_t *a, uint8_t *out, uin
 }
 
 
-/* CFS1 v2 SEC1 trailer: references, limits, live counters, PIN/key lengths,
- * 12-byte decimal PIN, 16-byte key, PIN encoding, algorithm reference, 00 00.
- * Credentials are provisioned by the owner; this is not DESFire/EMV SDA/DDA. */
+/* SEC1 byte 42 selects the SM4 challenge layout in CFS v3 (reserved in v2).
+ * EXTERNAL AUTHENTICATE consumes one challenge and compares one block. */
 static uint16_t authentication(iso7816_fs_t *fs, const apdu_t *a, uint8_t *out, uint16_t cap) {
     if (!fs->security_offset) return sw(out, 0x6D00);
     uint8_t *sec = fs->image + fs->security_offset;
+    const bool sm4 = sec[42] != 0;
+    const uint8_t challenge_length = sec[42] == ISO7816_FS_SM4_RAW16 ? SM4_BLOCK_SIZE : 8;
     if (a->ins == 0x84) {
         fs->challenge_valid = false;
         if (!sec[11]) return sw(out, 0x6D00);
-        if (a->p1 || a->p2 || a->lc || !a->has_le || a->le != 8) return sw(out, 0x6A86);
+        if (a->p1 || a->p2 || a->lc || !a->has_le || a->le != challenge_length) return sw(out, 0x6A86);
         if (!sec[9]) return sw(out, 0x6983);
-        if (cap < 10) return sw(out, 0x6700);
-        if (!fs->random || !fs->random(fs->challenge, 8)) return sw(out, 0x6985);
-        memcpy(out, fs->challenge, 8); fs->challenge_valid = true;
-        return result(out, 8, 0x9000);
+        if (cap < challenge_length + 2u) return sw(out, 0x6700);
+        memset(fs->challenge, 0, sizeof(fs->challenge));
+        if (!fs->random || !fs->random(fs->challenge, challenge_length)) return sw(out, 0x6985);
+        if (sm4 && challenge_length == 8) fs->challenge[8] = 0x80;
+        memcpy(out, fs->challenge, challenge_length); fs->challenge_valid = true;
+        return result(out, challenge_length, 0x9000);
     }
     const bool pin = a->ins == 0x20;
     const uint8_t length = sec[pin ? 10 : 11];
@@ -256,12 +265,21 @@ static uint16_t authentication(iso7816_fs_t *fs, const apdu_t *a, uint8_t *out, 
         fs->key_authenticated = false;
         if (!fs->challenge_valid) return sw(out, 0x6985);
         fs->challenge_valid = false;
-        uint8_t key[16], iv[8] = {0};
-        memcpy(key, sec + 24, length);
-        if (length == 8) memcpy(key + 8, key, 8);
-        ulc_tdes_enc_cbc(expected, fs->challenge, 8, key, iv);
-        memset(key, 0, sizeof(key)); memset(fs->challenge, 0, sizeof(fs->challenge));
-        expected_length = 8;
+        expected_length = sm4 ? SM4_BLOCK_SIZE : 8;
+        if (a->lc != expected_length) {
+            memset(fs->challenge, 0, sizeof(fs->challenge));
+            return sw(out, 0x6700);
+        }
+        if (sm4) {
+            sm4_encrypt_block(expected, fs->challenge, sec + 24);
+        } else {
+            uint8_t key[16], iv[8] = {0};
+            memcpy(key, sec + 24, length);
+            if (length == 8) memcpy(key + 8, key, 8);
+            ulc_tdes_enc_cbc(expected, fs->challenge, 8, key, iv);
+            memset(key, 0, sizeof(key));
+        }
+        memset(fs->challenge, 0, sizeof(fs->challenge));
     }
     if (a->lc != expected_length) { memset(expected, 0, sizeof(expected)); return sw(out, 0x6700); }
     uint8_t difference = 0;

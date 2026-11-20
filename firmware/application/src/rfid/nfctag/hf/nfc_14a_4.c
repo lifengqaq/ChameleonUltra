@@ -214,9 +214,6 @@ bool nfc_tag_14a_4_filesystem_command(const uint8_t *data, uint16_t length,
         case 6:
             if (length != 1) return false;
             nfc_tag_14a_4_clear_static_responses(); return true;
-        case 7: /* maximum CFS image version, supported PIN + DES/2-key-3DES */
-            if (length != 1) return false;
-            out[0] = 2; out[1] = 3; *out_length = 2; return true;
         default: return false;
     }
 }

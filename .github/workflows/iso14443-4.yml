@@ -8,6 +8,8 @@ on:
       - 'tests/iso14443_4_test.c'
       - 'firmware/application/src/rfid/nfctag/hf/iso7816_fs.*'
       - 'tests/iso7816_fs_test.c'
+      - 'tests/iso7816_security_test.c'
+      - 'firmware/application/src/rfid/crypto/sm4.*'
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,6 +33,7 @@ jobs:
           -Ifirmware/application/src/rfid/crypto
           firmware/application/src/rfid/nfctag/hf/iso7816_fs.c
           firmware/application/src/rfid/crypto/ulc_3des.c
+          firmware/application/src/rfid/crypto/sm4.c
           tests/iso7816_fs_test.c -o /tmp/iso7816_fs_test
       - name: Run filesystem selection, mutation and malformed APDU fixtures
         run: /tmp/iso7816_fs_test
@@ -41,6 +44,7 @@ jobs:
           -Ifirmware/application/src/rfid/nfctag/hf -Ifirmware/application/src/rfid/crypto
           firmware/application/src/rfid/nfctag/hf/iso7816_fs.c
           firmware/application/src/rfid/crypto/ulc_3des.c
+          firmware/application/src/rfid/crypto/sm4.c
           tests/iso7816_security_test.c -o /tmp/iso7816_security_test
       - name: Verify authentication, failed-attempt counters and RF reset behavior
         run: /tmp/iso7816_security_test
